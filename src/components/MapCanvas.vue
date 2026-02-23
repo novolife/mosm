@@ -16,10 +16,13 @@ const {
   stats,
   isLoading,
   selectedFeature,
+  drawMode,
   setCamera,
   fetchData,
   resize,
   clearSelection,
+  setDrawMode,
+  setOnDrawClick,
 } = useMapRenderer(() => canvasRef.value)
 
 defineExpose({
@@ -28,10 +31,13 @@ defineExpose({
   stats,
   isLoading,
   selectedFeature,
+  drawMode,
   setCamera,
   fetchData,
   resize,
   clearSelection,
+  setDrawMode,
+  setOnDrawClick,
 })
 </script>
 

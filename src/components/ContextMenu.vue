@@ -37,11 +37,15 @@ const visible = ref(false)
 const x = ref(0)
 const y = ref(0)
 const menuRef = ref<HTMLElement | null>(null)
+const dynamicItems = ref<MenuItem[]>([])
 
-// 显示菜单
-const show = (clientX: number, clientY: number) => {
+// 显示菜单（支持动态菜单项）
+const show = (clientX: number, clientY: number, newItems?: MenuItem[]) => {
   x.value = clientX
   y.value = clientY
+  if (newItems) {
+    dynamicItems.value = newItems
+  }
   visible.value = true
 
   // 下一帧检查边界
@@ -107,6 +111,9 @@ const menuStyle = computed(() => ({
   top: `${y.value}px`,
 }))
 
+// 实际使用的菜单项（动态优先）
+const activeItems = computed(() => dynamicItems.value.length > 0 ? dynamicItems.value : items)
+
 // 暴露方法给父组件
 defineExpose({ show, hide })
 </script>
@@ -120,7 +127,7 @@ defineExpose({ show, hide })
         class="context-menu"
         :style="menuStyle"
       >
-        <template v-for="item in items" :key="item.id">
+        <template v-for="item in activeItems" :key="item.id">
           <div v-if="item.separator" class="menu-separator" />
           <div
             v-else

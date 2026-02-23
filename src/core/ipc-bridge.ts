@@ -8,8 +8,11 @@ import { invoke } from '@tauri-apps/api/core'
 
 // 重导出类型
 export type {
+  AddNodeResult,
   DataBounds,
+  DeleteFeatureResult,
   FeatureDetails,
+  MoveNodeResult,
   NodeData,
   NodeDetails,
   NotFound,
@@ -35,8 +38,11 @@ export { lonLatToMercator, projectCoordinates } from './projection'
 export { decodeViewportResponse as decodeViewportResponseV2 } from './binary-decoder'
 
 import type {
+  AddNodeResult,
   DataBounds,
+  DeleteFeatureResult,
   FeatureDetails,
+  MoveNodeResult,
   ParseProgress,
   PickedFeature,
   StoreStats,
@@ -152,6 +158,53 @@ export async function updateNodeTags(
   newTags: [string, string][],
 ): Promise<UpdateTagsResult> {
   return await invoke<UpdateTagsResult>('update_node_tags', { nodeId, newTags })
+}
+
+/**
+ * 移动节点
+ *
+ * @param nodeId 节点 ID
+ * @param newMercX 新的墨卡托 X 坐标（米）
+ * @param newMercY 新的墨卡托 Y 坐标（米）
+ * @returns 移动结果
+ */
+export async function moveNode(
+  nodeId: number,
+  newMercX: number,
+  newMercY: number,
+): Promise<MoveNodeResult> {
+  return await invoke<MoveNodeResult>('move_node', { nodeId, newMercX, newMercY })
+}
+
+/**
+ * 添加节点
+ *
+ * @param mercX 墨卡托 X 坐标（米）
+ * @param mercY 墨卡托 Y 坐标（米）
+ * @returns 添加结果，包含新节点 ID
+ */
+export async function addNode(mercX: number, mercY: number): Promise<AddNodeResult> {
+  return await invoke<AddNodeResult>('add_node', { mercX, mercY })
+}
+
+/**
+ * 删除 Way
+ *
+ * @param wayId Way ID
+ * @returns 删除结果
+ */
+export async function deleteWay(wayId: number): Promise<DeleteFeatureResult> {
+  return await invoke<DeleteFeatureResult>('delete_way', { wayId })
+}
+
+/**
+ * 删除节点（含级联处理）
+ *
+ * @param nodeId 节点 ID
+ * @returns 删除结果，包含级联删除的 Way ID 列表
+ */
+export async function deleteNode(nodeId: number): Promise<DeleteFeatureResult> {
+  return await invoke<DeleteFeatureResult>('delete_node', { nodeId })
 }
 
 // ============================================================================

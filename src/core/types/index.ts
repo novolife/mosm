@@ -143,3 +143,23 @@ export interface UndoRedoResult {
   undo_count: number
   redo_count: number
 }
+
+/** 移动节点结果 */
+export interface MoveNodeResult {
+  success: boolean
+  message: string | null
+}
+
+/** 添加节点结果 */
+export interface AddNodeResult {
+  success: boolean
+  node_id: number
+  message: string | null
+}
+
+/** 删除要素结果 */
+export interface DeleteFeatureResult {
+  success: boolean
+  message: string | null
+  cascaded_way_ids: number[]
+}

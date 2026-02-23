@@ -63,3 +63,27 @@ pub struct UndoRedoResult {
     pub undo_count: usize,
     pub redo_count: usize,
 }
+
+/// 移动节点结果
+#[derive(Serialize)]
+pub struct MoveNodeResult {
+    pub success: bool,
+    pub message: Option<String>,
+}
+
+/// 添加节点结果
+#[derive(Serialize)]
+pub struct AddNodeResult {
+    pub success: bool,
+    pub node_id: i64,
+    pub message: Option<String>,
+}
+
+/// 删除要素结果
+#[derive(Serialize)]
+pub struct DeleteFeatureResult {
+    pub success: bool,
+    pub message: Option<String>,
+    /// 级联删除的 Way ID 列表（删除 Node 时可能级联删除 Way）
+    pub cascaded_way_ids: Vec<i64>,
+}

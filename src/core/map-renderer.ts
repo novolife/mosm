@@ -132,6 +132,16 @@ export class MapRenderer {
     | ((mercX: number, mercY: number, toleranceMeters: number, zoom: number) => void)
     | null = null
 
+  // 拖拽状态
+  private draggingNode: { nodeId: number; originalX: number; originalY: number } | null = null
+  private dragOffsetX = 0
+  private dragOffsetY = 0
+  private onNodeMoved: ((nodeId: number, newMercX: number, newMercY: number) => void) | null = null
+
+  // 绘制模式
+  private drawMode: 'none' | 'node' = 'none'
+  private onDrawClick: ((mercX: number, mercY: number) => void) | null = null
+
   constructor(options: RendererOptions) {
     this.canvas = options.canvas
     this.dpr = options.devicePixelRatio ?? window.devicePixelRatio ?? 1
@@ -286,6 +296,34 @@ export class MapRenderer {
   clearSelection(): void {
     this.selectedFeature = null
     this.requestRender()
+  }
+
+  /** 设置节点移动回调 */
+  setOnNodeMoved(
+    callback: ((nodeId: number, newMercX: number, newMercY: number) => void) | null,
+  ): void {
+    this.onNodeMoved = callback
+  }
+
+  /** 检查当前是否正在拖拽节点 */
+  isDraggingNode(): boolean {
+    return this.draggingNode !== null
+  }
+
+  /** 设置绘制模式 */
+  setDrawMode(mode: 'none' | 'node'): void {
+    this.drawMode = mode
+    this.canvas.style.cursor = mode === 'node' ? 'crosshair' : 'grab'
+  }
+
+  /** 获取当前绘制模式 */
+  getDrawMode(): 'none' | 'node' {
+    return this.drawMode
+  }
+
+  /** 设置绘制点击回调 */
+  setOnDrawClick(callback: ((mercX: number, mercY: number) => void) | null): void {
+    this.onDrawClick = callback
   }
 
   /** 设置样式 */
@@ -655,7 +693,15 @@ export class MapRenderer {
     let selectedNodeScreen: { x: number; y: number } | null = null
 
     for (const node of this.nodes) {
-      const { x, y } = this.mercatorToScreen(node.x, node.y)
+      // 如果正在拖拽该节点，应用偏移量（幻影拖拽）
+      let nodeX = node.x
+      let nodeY = node.y
+      if (this.draggingNode && this.draggingNode.nodeId === node.nodeId) {
+        nodeX += this.dragOffsetX
+        nodeY += this.dragOffsetY
+      }
+
+      const { x, y } = this.mercatorToScreen(nodeX, nodeY)
       const isHighPriority = node.refCount >= 2
 
       // 检查是否为选中节点
@@ -899,30 +945,72 @@ export class MapRenderer {
   }
 
   private setupEventListeners(): void {
-    let isDragging = false
-    let dragMoved = false
+    let isPanning = false
+    let panMoved = false
     let lastX = 0
     let lastY = 0
 
     this.canvas.addEventListener('mousedown', (e) => {
-      if (e.button === 0) {
-        // 左键
-        isDragging = true
-        dragMoved = false
-        lastX = e.clientX
-        lastY = e.clientY
-        this.canvas.style.cursor = 'grabbing'
+      if (e.button !== 0) return // 只处理左键
+
+      const rect = this.canvas.getBoundingClientRect()
+      const screenX = e.clientX - rect.left
+      const screenY = e.clientY - rect.top
+
+      // 检查是否点击了已选中的节点（开始拖拽）
+      if (this.selectedFeature?.type === 'node') {
+        const hitNode = this.hitTestNode(screenX, screenY, this.selectedFeature.id)
+        if (hitNode) {
+          // 找到该节点的原始坐标
+          const node = this.nodes.find((n) => n.nodeId === this.selectedFeature!.id)
+          if (node) {
+            this.draggingNode = {
+              nodeId: node.nodeId,
+              originalX: node.x,
+              originalY: node.y,
+            }
+            this.dragOffsetX = 0
+            this.dragOffsetY = 0
+            this.canvas.style.cursor = 'move'
+            return
+          }
+        }
       }
+
+      // 普通平移模式
+      isPanning = true
+      panMoved = false
+      lastX = e.clientX
+      lastY = e.clientY
+      this.canvas.style.cursor = 'grabbing'
     })
 
     window.addEventListener('mousemove', (e) => {
-      if (!isDragging) return
+      // 节点拖拽模式
+      if (this.draggingNode) {
+        const metersPerPixel = getMetersPerPixel(this.camera.zoom)
+        const dx = e.clientX - lastX
+        const dy = e.clientY - lastY
+
+        // 累加偏移量（墨卡托坐标）
+        this.dragOffsetX += dx * metersPerPixel
+        this.dragOffsetY -= dy * metersPerPixel // Y 轴方向相反
+
+        lastX = e.clientX
+        lastY = e.clientY
+
+        // 触发重绘（幻影模式：只修改本地渲染，不发 IPC）
+        this.requestRender()
+        return
+      }
+
+      // 平移模式
+      if (!isPanning) return
       const dx = e.clientX - lastX
       const dy = e.clientY - lastY
 
-      // 只有移动超过阈值才算真正拖拽
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-        dragMoved = true
+        panMoved = true
       }
 
       this.pan(dx, dy)
@@ -931,27 +1019,51 @@ export class MapRenderer {
     })
 
     window.addEventListener('mouseup', (e) => {
-      if (e.button === 0) {
-        isDragging = false
+      if (e.button !== 0) return
+
+      // 节点拖拽结束 - 提交到后端
+      if (this.draggingNode) {
+        const finalX = this.draggingNode.originalX + this.dragOffsetX
+        const finalY = this.draggingNode.originalY + this.dragOffsetY
+
+        // 只有实际移动了才提交
+        if (Math.abs(this.dragOffsetX) > 0.01 || Math.abs(this.dragOffsetY) > 0.01) {
+          if (this.onNodeMoved) {
+            this.onNodeMoved(this.draggingNode.nodeId, finalX, finalY)
+          }
+        }
+
+        this.draggingNode = null
+        this.dragOffsetX = 0
+        this.dragOffsetY = 0
         this.canvas.style.cursor = 'grab'
+        return
       }
+
+      isPanning = false
+      this.canvas.style.cursor = 'grab'
     })
 
-    // 点击拾取（只在没有拖拽时触发）
+    // 点击拾取/绘制（只在没有拖拽/平移时触发）
     this.canvas.addEventListener('click', (e) => {
-      if (dragMoved) return // 拖拽后不触发点击
+      if (panMoved) return
+      if (this.draggingNode) return
 
       const rect = this.canvas.getBoundingClientRect()
       const screenX = e.clientX - rect.left
       const screenY = e.clientY - rect.top
 
-      // 转换为墨卡托坐标
       const { mercX, mercY } = this.screenToMercator(screenX, screenY)
 
-      // 计算拾取容差（屏幕上 8 像素对应的米数）
+      // 绘制模式优先
+      if (this.drawMode === 'node' && this.onDrawClick) {
+        this.onDrawClick(mercX, mercY)
+        return
+      }
+
+      // 正常选中模式
       const toleranceMeters = this.getToleranceInMeters(8)
 
-      // 触发回调，传递当前缩放级别用于节点可见性过滤
       if (this.onFeatureClick) {
         this.onFeatureClick(mercX, mercY, toleranceMeters, this.camera.zoom)
       }
@@ -971,5 +1083,22 @@ export class MapRenderer {
     )
 
     this.canvas.style.cursor = 'grab'
+  }
+
+  /** 检测屏幕坐标是否命中指定节点 */
+  private hitTestNode(screenX: number, screenY: number, nodeId: number): boolean {
+    const node = this.nodes.find((n) => n.nodeId === nodeId)
+    if (!node) return false
+
+    const metersPerPixel = getMetersPerPixel(this.camera.zoom)
+
+    // 节点的屏幕位置
+    const nodeScreenX = (node.x - this.centerMercatorX) / metersPerPixel + this.width / 2
+    const nodeScreenY = (this.centerMercatorY - node.y) / metersPerPixel + this.height / 2
+
+    // 检测距离（容差 10 像素）
+    const dx = screenX - nodeScreenX
+    const dy = screenY - nodeScreenY
+    return dx * dx + dy * dy < 100 // 10^2 = 100
   }
 }

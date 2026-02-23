@@ -46,11 +46,15 @@
 - [x] Ctrl+Z / Ctrl+Shift+Z 快捷键支持
 
 **几何编辑（Spatial CRUD）**
-- [ ] 节点拖拽移动
-- [ ] 前端 Draft Layer（草稿层）
-- [ ] 新增节点/路径
-- [ ] 删除要素
-- [ ] 拓扑关系维护
+- [x] 节点拖拽移动（幻影拖拽 + 后端提交）
+- [x] R-Tree 级联边界框更新
+- [x] MoveNodeCommand 支持撤销/重做
+- [x] 新增节点（负数 ID 机制 + AddNodeCommand）
+- [x] 删除节点（级联更新 Way + DeleteNodeCommand）
+- [x] 删除路径（DeleteWayCommand）
+- [x] 绘制模式（N 键切换，ESC 退出）
+- [x] 删除快捷键（Delete/Backspace）
+- [ ] 新增路径
 
 **数据导出**
 - [ ] 导出为 .osm XML

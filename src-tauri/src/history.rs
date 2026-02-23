@@ -5,7 +5,7 @@
 //! - Command 必须实现 apply() 和 undo() 方法
 //! - HistoryManager 维护 undo_stack 和 redo_stack
 
-use crate::osm_store::OsmStore;
+use crate::osm_store::{OsmNode, OsmStore, OsmWay};
 use std::sync::Mutex;
 
 /// 命令执行结果
@@ -119,6 +119,148 @@ impl Command for UpdateNodeTagsCommand {
 
     fn description(&self) -> String {
         format!("Update tags for Node #{}", self.node_id)
+    }
+}
+
+/// 移动节点命令
+///
+/// 更新节点坐标，同时维护 R-Tree 索引
+pub struct MoveNodeCommand {
+    pub node_id: i64,
+    pub old_lon: f64,
+    pub old_lat: f64,
+    pub new_lon: f64,
+    pub new_lat: f64,
+}
+
+impl Command for MoveNodeCommand {
+    fn apply(&self, store: &OsmStore) -> CommandResult {
+        if store.update_node_position(self.node_id, self.new_lon, self.new_lat) {
+            CommandResult::success(true)
+        } else {
+            CommandResult::failure("Node not found")
+        }
+    }
+
+    fn undo(&self, store: &OsmStore) -> CommandResult {
+        if store.update_node_position(self.node_id, self.old_lon, self.old_lat) {
+            CommandResult::success(true)
+        } else {
+            CommandResult::failure("Node not found")
+        }
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "Move Node #{} from ({:.6}, {:.6}) to ({:.6}, {:.6})",
+            self.node_id, self.old_lon, self.old_lat, self.new_lon, self.new_lat
+        )
+    }
+}
+
+/// 添加节点命令
+pub struct AddNodeCommand {
+    pub node: OsmNode,
+}
+
+impl Command for AddNodeCommand {
+    fn apply(&self, store: &OsmStore) -> CommandResult {
+        store.add_node_with_index(self.node.clone());
+        CommandResult::success(true)
+    }
+
+    fn undo(&self, store: &OsmStore) -> CommandResult {
+        store.remove_node_with_index(self.node.id);
+        CommandResult::success(true)
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "Add Node #{} at ({:.6}, {:.6})",
+            self.node.id, self.node.lon, self.node.lat
+        )
+    }
+}
+
+/// 删除 Way 命令
+pub struct DeleteWayCommand {
+    pub way: OsmWay,
+}
+
+impl Command for DeleteWayCommand {
+    fn apply(&self, store: &OsmStore) -> CommandResult {
+        store.remove_way_with_index(self.way.id);
+        CommandResult::success(true)
+    }
+
+    fn undo(&self, store: &OsmStore) -> CommandResult {
+        store.add_way_with_index(self.way.clone());
+        CommandResult::success(true)
+    }
+
+    fn description(&self) -> String {
+        format!("Delete Way #{}", self.way.id)
+    }
+}
+
+/// 删除节点命令（含级联拓扑处理）
+///
+/// 删除节点时必须处理所有引用该节点的 Way：
+/// 1. 从 Way 的 node_refs 中移除该节点
+/// 2. 记录原始位置以便撤销时恢复
+/// 3. 如果 Way 只剩 1 个节点，级联删除该 Way
+pub struct DeleteNodeCommand {
+    pub node: OsmNode,
+    /// 节点在各个 Way 中的位置: (way_id, indices)
+    pub way_references: Vec<(i64, Vec<usize>)>,
+    /// 因节点删除而级联删除的 Way
+    pub cascaded_ways: Vec<OsmWay>,
+}
+
+impl Command for DeleteNodeCommand {
+    fn apply(&self, store: &OsmStore) -> CommandResult {
+        // 1. 从所有引用的 Way 中移除该节点（但不在这里做，因为 way_references 已记录）
+        for (way_id, _indices) in &self.way_references {
+            store.remove_node_from_way(*way_id, self.node.id);
+        }
+
+        // 2. 级联删除无效的 Way（节点数 < 2）
+        for way in &self.cascaded_ways {
+            store.remove_way_with_index(way.id);
+        }
+
+        // 3. 删除节点本身
+        store.remove_node_with_index(self.node.id);
+
+        CommandResult::success(true)
+    }
+
+    fn undo(&self, store: &OsmStore) -> CommandResult {
+        // 恢复顺序必须严格相反
+
+        // 1. 恢复节点
+        store.add_node_with_index(self.node.clone());
+
+        // 2. 恢复级联删除的 Way
+        for way in &self.cascaded_ways {
+            store.add_way_with_index(way.clone());
+        }
+
+        // 3. 将节点恢复到各个 Way 的原始位置
+        for (way_id, indices) in &self.way_references {
+            store.insert_node_to_way(*way_id, self.node.id, indices);
+        }
+
+        CommandResult::success(true)
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "Delete Node #{} (affects {} ways, cascades {} way deletions)",
+            self.node.id,
+            self.way_references.len(),
+            self.cascaded_ways.len()
+        )
     }
 }
 

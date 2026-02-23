@@ -66,6 +66,10 @@ pub fn run() {
             // 编辑命令
             commands::update_way_tags,
             commands::update_node_tags,
+            commands::move_node,
+            commands::add_node,
+            commands::delete_way,
+            commands::delete_node,
             commands::undo,
             commands::redo,
             commands::get_history_state,

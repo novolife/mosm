@@ -13,9 +13,20 @@ import Toolbar from './components/Toolbar.vue'
 import MapCanvas from './components/MapCanvas.vue'
 import ContextMenu from './components/ContextMenu.vue'
 import type { MenuItem } from './components/ContextMenu.vue'
-import { ref, watch } from 'vue'
-import { getNodeDetails, getWayDetails, type FeatureDetails } from './core/ipc-bridge'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
+import {
+  getNodeDetails,
+  getWayDetails,
+  addNode,
+  deleteNode,
+  deleteWay,
+  type FeatureDetails,
+} from './core/ipc-bridge'
 import { useHistory } from './composables/useHistory'
+
+// 编辑模式
+type EditMode = 'select' | 'draw-node'
+const editMode = ref<EditMode>('select')
 
 const mapRef = ref<InstanceType<typeof MapCanvas> | null>(null)
 const contextMenuRef = ref<InstanceType<typeof ContextMenu> | null>(null)
@@ -99,31 +110,153 @@ useHistory({
   },
 })
 
-// 右键菜单项配置
-const mapContextMenuItems: MenuItem[] = [
-  { id: 'add-node', label: '添加节点', shortcut: 'N' },
-  { id: 'add-way', label: '添加路径', shortcut: 'W' },
-  { id: 'separator-1', label: '', separator: true },
-  { id: 'select-all', label: '全选', shortcut: 'Ctrl+A' },
-  { id: 'separator-2', label: '', separator: true },
-  { id: 'properties', label: '属性', shortcut: 'Alt+Enter' },
-]
+// ============================================================================
+// 键盘快捷键
+// ============================================================================
+
+const handleKeyDown = (e: KeyboardEvent) => {
+  // 忽略输入框内的按键
+  const target = e.target as HTMLElement
+  if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+    return
+  }
+
+  switch (e.key) {
+    case 'Delete':
+    case 'Backspace':
+      if (selectedFeatureDetails.value && selectedFeatureDetails.value.type !== 'NotFound') {
+        e.preventDefault()
+        handleDeleteSelectedFeature()
+      }
+      break
+    case 'n':
+    case 'N':
+      if (!e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        toggleDrawNodeMode()
+      }
+      break
+    case 'Escape':
+      if (editMode.value !== 'select') {
+        e.preventDefault()
+        setDrawNodeMode(false)
+      }
+      break
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleKeyDown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeyDown)
+})
+
+// 右键菜单项配置（动态生成）
+const getContextMenuItems = (): MenuItem[] => {
+  const items: MenuItem[] = []
+
+  // 如果有选中要素，显示删除选项
+  if (selectedFeatureDetails.value && selectedFeatureDetails.value.type !== 'NotFound') {
+    const featureType = selectedFeatureDetails.value.type === 'Node' ? '节点' : '路径'
+    items.push({ id: 'delete', label: `删除${featureType}`, shortcut: 'Del' })
+    items.push({ id: 'separator-1', label: '', separator: true })
+  }
+
+  items.push(
+    { id: 'add-node', label: '添加节点', shortcut: 'N' },
+    { id: 'add-way', label: '添加路径', shortcut: 'W' },
+    { id: 'separator-2', label: '', separator: true },
+    { id: 'properties', label: '属性', shortcut: 'Alt+Enter' },
+  )
+
+  return items
+}
 
 // 处理地图区域右键
 const handleMapContextMenu = (e: MouseEvent) => {
-  contextMenuRef.value?.show(e.clientX, e.clientY)
+  contextMenuRef.value?.show(e.clientX, e.clientY, getContextMenuItems())
+}
+
+// 删除当前选中的要素
+const handleDeleteSelectedFeature = async () => {
+  const feature = mapRef.value?.selectedFeature
+  if (!feature) return
+
+  try {
+    if (feature.type === 'node') {
+      const result = await deleteNode(feature.id)
+      if (result.success) {
+        console.log(`节点 ${feature.id} 已删除`)
+        if (result.cascaded_way_ids.length > 0) {
+          console.log('级联删除的 Way:', result.cascaded_way_ids)
+        }
+        handleClearSelection()
+        mapRef.value?.fetchData()
+      } else {
+        console.error('删除节点失败:', result.message)
+      }
+    } else if (feature.type === 'way') {
+      const result = await deleteWay(feature.id)
+      if (result.success) {
+        console.log(`路径 ${feature.id} 已删除`)
+        handleClearSelection()
+        mapRef.value?.fetchData()
+      } else {
+        console.error('删除路径失败:', result.message)
+      }
+    }
+  } catch (error) {
+    console.error('删除要素出错:', error)
+  }
+}
+
+// 处理绘制模式下的点击
+const handleDrawClick = async (mercX: number, mercY: number) => {
+  try {
+    const result = await addNode(mercX, mercY)
+    if (result.success) {
+      console.log(`节点 ${result.node_id} 已创建`)
+      mapRef.value?.fetchData()
+      // 退出绘制模式
+      setDrawNodeMode(false)
+    } else {
+      console.error('添加节点失败:', result.message)
+    }
+  } catch (error) {
+    console.error('添加节点出错:', error)
+  }
+}
+
+// 设置绘制模式
+const setDrawNodeMode = (enabled: boolean) => {
+  editMode.value = enabled ? 'draw-node' : 'select'
+  mapRef.value?.setDrawMode(enabled ? 'node' : 'none')
+  if (enabled) {
+    mapRef.value?.setOnDrawClick(handleDrawClick)
+  } else {
+    mapRef.value?.setOnDrawClick(null)
+  }
+}
+
+// 切换绘制模式
+const toggleDrawNodeMode = () => {
+  setDrawNodeMode(editMode.value !== 'draw-node')
 }
 
 // 处理菜单项选择
 const handleMenuSelect = (id: string) => {
   console.log('菜单选择:', id)
-  // TODO: 实现具体的菜单操作
   switch (id) {
     case 'add-node':
-      console.log('添加节点功能待实现')
+      toggleDrawNodeMode()
       break
     case 'add-way':
       console.log('添加路径功能待实现')
+      break
+    case 'delete':
+      handleDeleteSelectedFeature()
       break
     case 'properties':
       console.log('属性面板功能待实现')
@@ -221,9 +354,13 @@ const handleDataLoaded = (bounds: DataBounds | null) => {
     <!-- 自定义右键菜单 -->
     <ContextMenu
       ref="contextMenuRef"
-      :items="mapContextMenuItems"
       @select="handleMenuSelect"
     />
+
+    <!-- 绘制模式指示器 -->
+    <div v-if="editMode === 'draw-node'" class="draw-mode-indicator">
+      绘制节点模式 - 点击地图添加节点 (按 ESC 退出)
+    </div>
   </div>
 </template>
 
@@ -411,5 +548,20 @@ body,
 
 .statusbar-spacer {
   flex: 1;
+}
+
+.draw-mode-indicator {
+  position: fixed;
+  top: calc(var(--toolbar-height) + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
+  border-radius: 4px;
+  font-size: 13px;
+  z-index: 1000;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 </style>

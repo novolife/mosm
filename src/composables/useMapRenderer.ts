@@ -16,6 +16,7 @@ import {
   queryViewportFull,
   decodeViewportResponseV2,
   pickFeature,
+  moveNode,
   type Viewport,
   type PickedFeature,
 } from '../core/ipc-bridge'
@@ -39,6 +40,10 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
   // 选中状态
   const selectedFeature = ref<SelectedFeature | null>(null)
   const isPicking = ref(false)
+
+  // 绘制模式
+  const drawMode = ref<'none' | 'node'>('none')
+  let onDrawClickCallback: ((mercX: number, mercY: number) => void) | null = null
 
   let statsInterval: ReturnType<typeof setInterval> | null = null
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -68,6 +73,29 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
         console.error('拾取要素失败:', error)
       } finally {
         isPicking.value = false
+      }
+    })
+
+    // 设置节点移动回调
+    renderer.value.setOnNodeMoved(async (nodeId, newMercX, newMercY) => {
+      try {
+        const result = await moveNode(nodeId, newMercX, newMercY)
+        if (result.success) {
+          console.log(`节点 ${nodeId} 移动成功`)
+          // 重新获取数据以更新 Way 的渲染
+          fetchData()
+        } else {
+          console.error('移动节点失败:', result.message)
+        }
+      } catch (error) {
+        console.error('移动节点出错:', error)
+      }
+    })
+
+    // 设置绘制点击回调
+    renderer.value.setOnDrawClick((mercX, mercY) => {
+      if (onDrawClickCallback) {
+        onDrawClickCallback(mercX, mercY)
       }
     })
 
@@ -144,6 +172,15 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
     renderer.value?.resize()
   }
 
+  const setDrawMode = (mode: 'none' | 'node') => {
+    drawMode.value = mode
+    renderer.value?.setDrawMode(mode)
+  }
+
+  const setOnDrawClick = (callback: ((mercX: number, mercY: number) => void) | null) => {
+    onDrawClickCallback = callback
+  }
+
   watch(camera, (newCamera) => {
     renderer.value?.setCamera(newCamera)
   }, { deep: true })
@@ -178,9 +215,12 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
     viewport,
     selectedFeature,
     isPicking,
+    drawMode,
     setCamera,
     fetchData,
     resize,
     clearSelection,
+    setDrawMode,
+    setOnDrawClick,
   }
 }

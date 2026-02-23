@@ -8,7 +8,7 @@
 use dashmap::DashMap;
 use rstar::{RTree, RTreeObject, AABB};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 /// OSM 节点 (Node) - 地图上的一个坐标点
 #[derive(Debug, Clone)]
@@ -66,6 +66,16 @@ pub struct SpatialEntry {
     pub max_lat: f64,
 }
 
+impl PartialEq for SpatialEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && (self.min_lon - other.min_lon).abs() < 1e-10
+            && (self.min_lat - other.min_lat).abs() < 1e-10
+            && (self.max_lon - other.max_lon).abs() < 1e-10
+            && (self.max_lat - other.max_lat).abs() < 1e-10
+    }
+}
+
 impl RTreeObject for SpatialEntry {
     type Envelope = AABB<[f64; 2]>;
 
@@ -84,6 +94,8 @@ pub struct OsmStore {
     node_index: RwLock<RTree<SpatialEntry>>,
     way_index: RwLock<RTree<SpatialEntry>>,
     index_dirty: AtomicBool,
+    /// 本地 ID 生成器（负数 ID，用于新创建的要素）
+    next_local_id: AtomicI64,
 }
 
 impl OsmStore {
@@ -96,7 +108,13 @@ impl OsmStore {
             node_index: RwLock::new(RTree::new()),
             way_index: RwLock::new(RTree::new()),
             index_dirty: AtomicBool::new(false),
+            next_local_id: AtomicI64::new(-1),
         }
+    }
+
+    /// 生成新的本地 ID（负数，用于未提交到服务器的新要素）
+    pub fn generate_local_id(&self) -> i64 {
+        self.next_local_id.fetch_sub(1, Ordering::SeqCst)
     }
 
     /// 插入节点 (不更新索引，需要后续调用 rebuild_indices)
@@ -270,6 +288,269 @@ impl OsmStore {
     /// 获取路径索引的只读访问
     pub fn way_index(&self) -> std::sync::RwLockReadGuard<'_, RTree<SpatialEntry>> {
         self.way_index.read().unwrap()
+    }
+
+    /// 更新节点坐标并维护 R-Tree 索引
+    ///
+    /// 这是移动节点的核心操作，必须同时更新：
+    /// 1. DashMap 中节点的坐标
+    /// 2. R-Tree 中节点的索引
+    /// 3. R-Tree 中所有引用该节点的 Way 的边界框
+    pub fn update_node_position(&self, node_id: i64, new_lon: f64, new_lat: f64) -> bool {
+        // 1. 更新 DashMap 中的节点坐标
+        let old_entry = {
+            let mut node = match self.nodes.get_mut(&node_id) {
+                Some(n) => n,
+                None => return false,
+            };
+            let old_lon = node.lon;
+            let old_lat = node.lat;
+            node.lon = new_lon;
+            node.lat = new_lat;
+            SpatialEntry {
+                id: node_id,
+                min_lon: old_lon,
+                min_lat: old_lat,
+                max_lon: old_lon,
+                max_lat: old_lat,
+            }
+        };
+
+        // 2. 更新节点 R-Tree 索引
+        let new_entry = SpatialEntry {
+            id: node_id,
+            min_lon: new_lon,
+            min_lat: new_lat,
+            max_lon: new_lon,
+            max_lat: new_lat,
+        };
+
+        if let Ok(mut index) = self.node_index.write() {
+            index.remove(&old_entry);
+            index.insert(new_entry);
+        }
+
+        // 3. 找出所有引用该节点的 Way，更新它们在 R-Tree 中的边界框
+        let affected_ways: Vec<i64> = self
+            .ways
+            .iter()
+            .filter(|entry| entry.value().node_refs.contains(&node_id))
+            .map(|entry| *entry.key())
+            .collect();
+
+        if !affected_ways.is_empty() {
+            if let Ok(mut way_index) = self.way_index.write() {
+                for way_id in affected_ways {
+                    if let Some(way) = self.ways.get(&way_id) {
+                        // 计算旧的边界框（用于删除）
+                        // 注意：由于节点坐标已更新，我们无法精确获取旧边界框
+                        // 所以我们使用 retain 方法按 ID 删除
+                        let entries_to_remove: Vec<_> = way_index
+                            .iter()
+                            .filter(|e| e.id == way_id)
+                            .cloned()
+                            .collect();
+                        
+                        for entry in entries_to_remove {
+                            way_index.remove(&entry);
+                        }
+
+                        // 计算新的边界框并插入
+                        if let Some(new_bbox) = self.compute_way_bbox(&way) {
+                            way_index.insert(new_bbox);
+                        }
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// 查找所有引用指定节点的 Way ID
+    pub fn find_ways_referencing_node(&self, node_id: i64) -> Vec<i64> {
+        self.ways
+            .iter()
+            .filter(|entry| entry.value().node_refs.contains(&node_id))
+            .map(|entry| *entry.key())
+            .collect()
+    }
+
+    /// 添加节点并更新 R-Tree 索引
+    pub fn add_node_with_index(&self, node: OsmNode) {
+        let entry = SpatialEntry {
+            id: node.id,
+            min_lon: node.lon,
+            min_lat: node.lat,
+            max_lon: node.lon,
+            max_lat: node.lat,
+        };
+
+        self.nodes.insert(node.id, node);
+
+        if let Ok(mut index) = self.node_index.write() {
+            index.insert(entry);
+        }
+    }
+
+    /// 删除节点并更新 R-Tree 索引
+    pub fn remove_node_with_index(&self, node_id: i64) -> Option<OsmNode> {
+        let removed = self.nodes.remove(&node_id);
+
+        if let Some((_, ref node)) = removed {
+            let entry = SpatialEntry {
+                id: node_id,
+                min_lon: node.lon,
+                min_lat: node.lat,
+                max_lon: node.lon,
+                max_lat: node.lat,
+            };
+
+            if let Ok(mut index) = self.node_index.write() {
+                index.remove(&entry);
+            }
+        }
+
+        removed.map(|(_, n)| n)
+    }
+
+    /// 添加 Way 并更新 R-Tree 索引和节点引用计数
+    pub fn add_way_with_index(&self, way: OsmWay) {
+        // 更新节点引用计数
+        for &node_id in &way.node_refs {
+            self.node_ref_count
+                .entry(node_id)
+                .and_modify(|c| *c = c.saturating_add(1))
+                .or_insert(1);
+        }
+
+        // 计算边界框并插入 R-Tree
+        if let Some(bbox) = self.compute_way_bbox(&way) {
+            if let Ok(mut index) = self.way_index.write() {
+                index.insert(bbox);
+            }
+        }
+
+        self.ways.insert(way.id, way);
+    }
+
+    /// 删除 Way 并更新 R-Tree 索引和节点引用计数
+    pub fn remove_way_with_index(&self, way_id: i64) -> Option<OsmWay> {
+        let removed = self.ways.remove(&way_id);
+
+        if let Some((_, ref way)) = removed {
+            // 减少节点引用计数
+            for &node_id in &way.node_refs {
+                self.node_ref_count.entry(node_id).and_modify(|c| {
+                    *c = c.saturating_sub(1);
+                });
+            }
+
+            // 从 R-Tree 移除
+            if let Ok(mut index) = self.way_index.write() {
+                let entries_to_remove: Vec<_> = index
+                    .iter()
+                    .filter(|e| e.id == way_id)
+                    .cloned()
+                    .collect();
+
+                for entry in entries_to_remove {
+                    index.remove(&entry);
+                }
+            }
+        }
+
+        removed.map(|(_, w)| w)
+    }
+
+    /// 从 Way 中移除指定节点引用，返回被移除的索引位置列表
+    pub fn remove_node_from_way(&self, way_id: i64, node_id: i64) -> Vec<usize> {
+        let mut removed_indices = Vec::new();
+
+        if let Some(mut way) = self.ways.get_mut(&way_id) {
+            // 记录所有需要移除的位置
+            let indices: Vec<usize> = way
+                .node_refs
+                .iter()
+                .enumerate()
+                .filter(|(_, &id)| id == node_id)
+                .map(|(i, _)| i)
+                .collect();
+
+            // 从后往前删除，避免索引位移问题
+            for &idx in indices.iter().rev() {
+                way.node_refs.remove(idx);
+            }
+
+            removed_indices = indices;
+        }
+
+        // 减少节点引用计数
+        if !removed_indices.is_empty() {
+            self.node_ref_count.entry(node_id).and_modify(|c| {
+                *c = c.saturating_sub(removed_indices.len() as u16);
+            });
+
+            // 更新 Way 的 R-Tree 边界框
+            self.update_way_rtree(way_id);
+        }
+
+        removed_indices
+    }
+
+    /// 在 Way 的指定位置插入节点引用
+    pub fn insert_node_to_way(&self, way_id: i64, node_id: i64, indices: &[usize]) {
+        if let Some(mut way) = self.ways.get_mut(&way_id) {
+            // 从前往后插入，需要考虑索引位移
+            for (offset, &idx) in indices.iter().enumerate() {
+                let insert_pos = idx + offset;
+                if insert_pos <= way.node_refs.len() {
+                    way.node_refs.insert(insert_pos, node_id);
+                }
+            }
+        }
+
+        // 增加节点引用计数
+        if !indices.is_empty() {
+            self.node_ref_count
+                .entry(node_id)
+                .and_modify(|c| *c = c.saturating_add(indices.len() as u16))
+                .or_insert(indices.len() as u16);
+
+            // 更新 Way 的 R-Tree 边界框
+            self.update_way_rtree(way_id);
+        }
+    }
+
+    /// 更新 Way 的 R-Tree 边界框
+    fn update_way_rtree(&self, way_id: i64) {
+        if let Ok(mut index) = self.way_index.write() {
+            // 移除旧的边界框
+            let entries_to_remove: Vec<_> = index
+                .iter()
+                .filter(|e| e.id == way_id)
+                .cloned()
+                .collect();
+
+            for entry in entries_to_remove {
+                index.remove(&entry);
+            }
+
+            // 插入新的边界框
+            if let Some(way) = self.ways.get(&way_id) {
+                if let Some(bbox) = self.compute_way_bbox(&way) {
+                    index.insert(bbox);
+                }
+            }
+        }
+    }
+
+    /// 检查 Way 是否仍然有效（至少 2 个节点）
+    pub fn is_way_valid(&self, way_id: i64) -> bool {
+        self.ways
+            .get(&way_id)
+            .map(|w| w.node_refs.len() >= 2)
+            .unwrap_or(false)
     }
 }
 
