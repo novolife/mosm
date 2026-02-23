@@ -111,10 +111,6 @@ impl OsmStore {
 
     /// 批量重建空间索引 (O(n log n) 一次性构建，比逐条插入快 100 倍)
     pub fn rebuild_indices(&self) {
-        eprintln!("rebuild_indices: 开始构建索引...");
-        eprintln!("  DashMap 中有 {} 个节点, {} 条路径", self.nodes.len(), self.ways.len());
-        eprintln!("  node_ref_count 中有 {} 条记录", self.node_ref_count.len());
-
         let node_entries: Vec<SpatialEntry> = self
             .nodes
             .iter()
@@ -136,20 +132,15 @@ impl OsmStore {
             .filter_map(|entry| self.compute_way_bbox(entry.value()))
             .collect();
 
-        eprintln!("  准备索引 {} 个节点条目, {} 个路径条目", node_entries.len(), way_entries.len());
-
         if let Ok(mut index) = self.node_index.write() {
             *index = RTree::bulk_load(node_entries);
-            eprintln!("  节点索引构建完成, 大小: {}", index.size());
         }
 
         if let Ok(mut index) = self.way_index.write() {
             *index = RTree::bulk_load(way_entries);
-            eprintln!("  路径索引构建完成, 大小: {}", index.size());
         }
 
         self.index_dirty.store(false, Ordering::Relaxed);
-        eprintln!("rebuild_indices: 索引构建完成");
     }
 
     /// 计算 Way 的包围盒

@@ -41,6 +41,19 @@ const handleDataLoaded = (bounds: DataBounds | null) => {
   if (bounds && mapRef.value) {
     const lonSpan = bounds.max_lon - bounds.min_lon
     const latSpan = bounds.max_lat - bounds.min_lat
+    
+    // #region agent log - 记录边界和计算过程
+    const logData = {
+      loc: 'handleDataLoaded',
+      lonSpan: lonSpan.toFixed(4),
+      latSpan: latSpan.toFixed(4),
+      ratio: (lonSpan / latSpan).toFixed(4),
+      center: `${bounds.center_lon.toFixed(4)}, ${bounds.center_lat.toFixed(4)}`
+    }
+    const existingLog = localStorage.getItem('mosm_debug_log') || ''
+    localStorage.setItem('mosm_debug_log', existingLog + '\n' + JSON.stringify(logData))
+    // #endregion
+    
     const maxSpan = Math.max(lonSpan, latSpan)
     const zoom = Math.max(1, Math.min(18, Math.floor(Math.log2(360 / maxSpan))))
 

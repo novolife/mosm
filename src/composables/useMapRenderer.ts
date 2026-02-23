@@ -40,6 +40,11 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
     renderer.value.setCamera(camera.value)
     renderer.value.start()
 
+    // 设置相机变化回调，触发数据重新请求
+    renderer.value.setOnCameraChange(() => {
+      debouncedFetchData()
+    })
+
     statsInterval = setInterval(() => {
       if (renderer.value) {
         stats.value = renderer.value.getStats()
@@ -61,16 +66,9 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
 
     try {
       const rawData = await queryViewportFull(vp)
-      console.log(`原始数据: ${rawData.byteLength} 字节`)
 
       if (rawData.byteLength > 16 && renderer.value) {
-        const { nodes, wayGeometry, header } = decodeViewportResponseV2(rawData.buffer)
-
-        console.log(`视口数据: ${header.nodeCount} 节点 (header), ${nodes.length} 节点 (解码), ${header.wayCount} 路径`)
-        if (nodes.length > 0) {
-          console.log(`首个节点: lon=${nodes[0].lon}, lat=${nodes[0].lat}, refCount=${nodes[0].refCount}`)
-        }
-
+        const { nodes, wayGeometry } = decodeViewportResponseV2(rawData.buffer)
         renderer.value.setNodeData(nodes)
         renderer.value.setWayData(wayGeometry)
       }
@@ -103,7 +101,13 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
   }, { deep: true })
 
   onMounted(() => {
-    initialize()
+    // 使用 requestAnimationFrame 确保 DOM 布局已完成
+    // 双重 RAF 确保浏览器已完成布局和绘制
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        initialize()
+      })
+    })
     window.addEventListener('resize', resize)
   })
 

@@ -37,7 +37,8 @@ defineExpose({
 
     <div class="map-overlay map-stats">
       <span>FPS: {{ stats.fps }}</span>
-      <span>Zoom: {{ camera.zoom.toFixed(1) }}</span>
+      <span>Zoom: {{ Math.floor(camera.zoom) }}</span>
+      <span>{{ camera.centerLon.toFixed(4) }}°E, {{ camera.centerLat.toFixed(4) }}°N</span>
       <span>Nodes: {{ stats.nodeCount.toLocaleString() }}</span>
       <span>Ways: {{ stats.wayCount.toLocaleString() }}</span>
       <span>Render: {{ stats.renderTime.toFixed(1) }}ms</span>

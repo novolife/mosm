@@ -120,10 +120,10 @@ export function decodeHeader(buffer: ArrayBuffer): ResponseHeader {
   }
 }
 
-/** 节点数据 (带优先级) */
+/** 节点数据 (带优先级, 墨卡托坐标) */
 export interface NodeData {
-  lon: number
-  lat: number
+  x: number      // 墨卡托 X 坐标（米）
+  y: number      // 墨卡托 Y 坐标（米）
   refCount: number
 }
 
@@ -151,8 +151,8 @@ export function decodeViewportResponseV2(buffer: ArrayBuffer): ViewportData {
 
   for (let i = 0; i < header.nodeCount; i++) {
     nodes.push({
-      lon: view.getFloat64(offset, true),
-      lat: view.getFloat64(offset + 8, true),
+      x: view.getFloat64(offset, true),      // 墨卡托 X
+      y: view.getFloat64(offset + 8, true),  // 墨卡托 Y
       refCount: view.getUint16(offset + 16, true),
     })
     offset += NODE_SIZE

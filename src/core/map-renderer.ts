@@ -46,24 +46,37 @@ const DEFAULT_STYLE: RenderStyle = {
 }
 
 const DEG_TO_RAD = Math.PI / 180
-const TILE_SIZE = 256
 
-/** Web Mercator 投影：经纬度 -> 世界像素坐标 */
-function lonLatToPixel(lon: number, lat: number, zoom: number): { x: number; y: number } {
-  const scale = TILE_SIZE * Math.pow(2, zoom)
-  const x = ((lon + 180) / 360) * scale
-  const latRad = lat * DEG_TO_RAD
-  const y = ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * scale
+/** 地球赤道半周长（米），与 Rust 端一致 */
+const EARTH_HALF_CIRCUMFERENCE = 20037508.342789244
+
+/**
+ * 经纬度 -> Web 墨卡托坐标（米）
+ * 与 Rust 端 projection.rs 中的 lonlat_to_mercator 一致
+ */
+function lonLatToMercator(lon: number, lat: number): { x: number; y: number } {
+  const x = lon * EARTH_HALF_CIRCUMFERENCE / 180
+  const latClamped = Math.max(-85.051129, Math.min(85.051129, lat))
+  const latRad = (90 + latClamped) * DEG_TO_RAD / 2
+  const y = Math.log(Math.tan(latRad)) * EARTH_HALF_CIRCUMFERENCE / Math.PI
   return { x, y }
 }
 
-/** Web Mercator 逆投影：世界像素坐标 -> 经纬度 */
-function pixelToLonLat(x: number, y: number, zoom: number): { lon: number; lat: number } {
-  const scale = TILE_SIZE * Math.pow(2, zoom)
-  const lon = (x / scale) * 360 - 180
-  const n = Math.PI - (2 * Math.PI * y) / scale
-  const lat = (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)))
+/**
+ * Web 墨卡托坐标（米） -> 经纬度
+ */
+function mercatorToLonLat(x: number, y: number): { lon: number; lat: number } {
+  const lon = x * 180 / EARTH_HALF_CIRCUMFERENCE
+  const lat = (2 * Math.atan(Math.exp(y * Math.PI / EARTH_HALF_CIRCUMFERENCE)) - Math.PI / 2) * 180 / Math.PI
   return { lon, lat }
+}
+
+/**
+ * 计算给定 zoom 级别下，每像素对应多少米
+ * 在 zoom=0 时，整个世界 (40075016.686 米) 映射到 256 像素
+ */
+function getMetersPerPixel(zoom: number): number {
+  return (2 * EARTH_HALF_CIRCUMFERENCE) / (256 * Math.pow(2, zoom))
 }
 
 export class MapRenderer {
@@ -79,9 +92,9 @@ export class MapRenderer {
     zoom: 2,
   }
 
-  // 缓存的相机中心像素坐标
-  private centerPixelX = 0
-  private centerPixelY = 0
+  // 缓存的相机中心墨卡托坐标（米）
+  private centerMercatorX = 0
+  private centerMercatorY = 0
 
   private nodes: NodeData[] = []
   private wayBuffer: ArrayBuffer | null = null
@@ -101,6 +114,9 @@ export class MapRenderer {
   private frameCount = 0
   private fpsUpdateTime = 0
 
+  // 相机变化回调
+  private onCameraChange: (() => void) | null = null
+
   constructor(options: RendererOptions) {
     this.canvas = options.canvas
     this.dpr = options.devicePixelRatio ?? window.devicePixelRatio ?? 1
@@ -113,7 +129,7 @@ export class MapRenderer {
 
     this.resize()
     this.setupEventListeners()
-    this.updateCenterPixel()
+    this.updateCenterMercator()
   }
 
   /** 启动渲染循环 */
@@ -141,32 +157,37 @@ export class MapRenderer {
     this.canvas.width = this.width * this.dpr
     this.canvas.height = this.height * this.dpr
 
-    this.ctx.scale(this.dpr, this.dpr)
+    // 重置变换矩阵，避免 DPR 累积
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
     this.requestRender()
   }
 
   /** 设置相机位置 */
   setCamera(camera: Partial<CameraState>): void {
     Object.assign(this.camera, camera)
-    this.updateCenterPixel()
+    this.updateCenterMercator()
     this.requestRender()
   }
 
   /** 获取当前视口 (WGS84 坐标) */
   getViewport(): Viewport {
-    const halfWidth = this.width / 2
-    const halfHeight = this.height / 2
+    const metersPerPixel = getMetersPerPixel(this.camera.zoom)
+    const halfWidthMeters = (this.width / 2) * metersPerPixel
+    const halfHeightMeters = (this.height / 2) * metersPerPixel
 
-    const topLeft = pixelToLonLat(
-      this.centerPixelX - halfWidth,
-      this.centerPixelY - halfHeight,
-      this.camera.zoom
-    )
-    const bottomRight = pixelToLonLat(
-      this.centerPixelX + halfWidth,
-      this.centerPixelY + halfHeight,
-      this.camera.zoom
-    )
+    // 左上角和右下角的墨卡托坐标
+    const topLeftMerc = {
+      x: this.centerMercatorX - halfWidthMeters,
+      y: this.centerMercatorY + halfHeightMeters, // Y 轴向上为正
+    }
+    const bottomRightMerc = {
+      x: this.centerMercatorX + halfWidthMeters,
+      y: this.centerMercatorY - halfHeightMeters,
+    }
+
+    // 转换回经纬度
+    const topLeft = mercatorToLonLat(topLeftMerc.x, topLeftMerc.y)
+    const bottomRight = mercatorToLonLat(bottomRightMerc.x, bottomRightMerc.y)
 
     return {
       min_lon: topLeft.lon,
@@ -179,10 +200,6 @@ export class MapRenderer {
 
   /** 设置节点数据 (带优先级) */
   setNodeData(nodes: NodeData[]): void {
-    console.log(`MapRenderer.setNodeData: 接收 ${nodes.length} 个节点`)
-    if (nodes.length > 0) {
-      console.log(`  首个: lon=${nodes[0].lon}, lat=${nodes[0].lat}, ref=${nodes[0].refCount}`)
-    }
     this.nodes = nodes
     this.stats.nodeCount = nodes.length
     this.requestRender()
@@ -213,6 +230,18 @@ export class MapRenderer {
     return { ...this.camera }
   }
 
+  /** 设置相机变化回调 */
+  setOnCameraChange(callback: (() => void) | null): void {
+    this.onCameraChange = callback
+  }
+
+  /** 触发相机变化回调 */
+  private notifyCameraChange(): void {
+    if (this.onCameraChange) {
+      this.onCameraChange()
+    }
+  }
+
   /** 设置样式 */
   setStyle(style: Partial<RenderStyle>): void {
     Object.assign(this.style, style)
@@ -221,15 +250,19 @@ export class MapRenderer {
 
   /** 平移 (屏幕像素) */
   pan(dx: number, dy: number): void {
-    this.centerPixelX -= dx
-    this.centerPixelY -= dy
+    const metersPerPixel = getMetersPerPixel(this.camera.zoom)
+    
+    // 屏幕像素移动转换为墨卡托坐标移动
+    this.centerMercatorX -= dx * metersPerPixel
+    this.centerMercatorY += dy * metersPerPixel // Y 轴向上为正，屏幕向下为正
 
-    // 反向计算新的经纬度中心
-    const newCenter = pixelToLonLat(this.centerPixelX, this.centerPixelY, this.camera.zoom)
+    // 更新经纬度中心
+    const newCenter = mercatorToLonLat(this.centerMercatorX, this.centerMercatorY)
     this.camera.centerLon = newCenter.lon
     this.camera.centerLat = newCenter.lat
 
     this.requestRender()
+    this.notifyCameraChange()
   }
 
   /** 缩放 */
@@ -239,27 +272,31 @@ export class MapRenderer {
 
     if (newZoom === oldZoom) return
 
-    // 计算缩放中心的世界坐标
-    const worldX = this.centerPixelX + (screenX - this.width / 2)
-    const worldY = this.centerPixelY + (screenY - this.height / 2)
-    const zoomPoint = pixelToLonLat(worldX, worldY, oldZoom)
+    const oldMetersPerPixel = getMetersPerPixel(oldZoom)
+    const newMetersPerPixel = getMetersPerPixel(newZoom)
+
+    // 计算缩放中心的墨卡托坐标
+    const offsetX = (screenX - this.width / 2) * oldMetersPerPixel
+    const offsetY = (this.height / 2 - screenY) * oldMetersPerPixel // 屏幕 Y 向下，墨卡托 Y 向上
+    const zoomPointMercX = this.centerMercatorX + offsetX
+    const zoomPointMercY = this.centerMercatorY + offsetY
 
     // 更新缩放级别
     this.camera.zoom = newZoom
 
-    // 计算新的缩放中心像素位置
-    const newZoomPointPixel = lonLatToPixel(zoomPoint.lon, zoomPoint.lat, newZoom)
-
-    // 保持缩放中心在屏幕同一位置
-    this.centerPixelX = newZoomPointPixel.x - (screenX - this.width / 2)
-    this.centerPixelY = newZoomPointPixel.y - (screenY - this.height / 2)
+    // 保持缩放中心在屏幕同一位置：计算新的中心墨卡托坐标
+    const newOffsetX = (screenX - this.width / 2) * newMetersPerPixel
+    const newOffsetY = (this.height / 2 - screenY) * newMetersPerPixel
+    this.centerMercatorX = zoomPointMercX - newOffsetX
+    this.centerMercatorY = zoomPointMercY - newOffsetY
 
     // 更新相机中心经纬度
-    const newCenter = pixelToLonLat(this.centerPixelX, this.centerPixelY, newZoom)
+    const newCenter = mercatorToLonLat(this.centerMercatorX, this.centerMercatorY)
     this.camera.centerLon = newCenter.lon
     this.camera.centerLat = newCenter.lat
 
     this.requestRender()
+    this.notifyCameraChange()
   }
 
   /** 销毁 */
@@ -272,10 +309,10 @@ export class MapRenderer {
   // 私有方法
   // ===========================================================================
 
-  private updateCenterPixel(): void {
-    const center = lonLatToPixel(this.camera.centerLon, this.camera.centerLat, this.camera.zoom)
-    this.centerPixelX = center.x
-    this.centerPixelY = center.y
+  private updateCenterMercator(): void {
+    const center = lonLatToMercator(this.camera.centerLon, this.camera.centerLat)
+    this.centerMercatorX = center.x
+    this.centerMercatorY = center.y
   }
 
   private loop = (): void => {
@@ -306,6 +343,9 @@ export class MapRenderer {
   private render(): void {
     const { ctx, width, height } = this
 
+    // 重置变换矩阵，确保每帧渲染前状态正确
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+
     ctx.fillStyle = this.style.backgroundColor
     ctx.fillRect(0, 0, width, height)
 
@@ -318,62 +358,61 @@ export class MapRenderer {
     ctx.restore()
   }
 
-  /** 经纬度 -> 屏幕坐标 (相对于画布中心) */
-  private lonLatToScreen(lon: number, lat: number): { x: number; y: number } {
-    const pixel = lonLatToPixel(lon, lat, this.camera.zoom)
+  /** 墨卡托坐标 -> 屏幕坐标 (相对于画布中心) */
+  private mercatorToScreen(mercX: number, mercY: number): { x: number; y: number } {
+    const metersPerPixel = getMetersPerPixel(this.camera.zoom)
     return {
-      x: pixel.x - this.centerPixelX,
-      y: pixel.y - this.centerPixelY,
+      x: (mercX - this.centerMercatorX) / metersPerPixel,
+      y: (this.centerMercatorY - mercY) / metersPerPixel, // Y 轴翻转
     }
   }
 
   /**
    * 渲染节点 (LOD 策略)
    *
-   * - zoom < 14: 不显示节点 (Rust 侧已过滤)
-   * - zoom 14-16: 显示红点 (只有连接多路径的节点)
-   * - zoom >= 17: 显示红色圆圈 (所有节点)
+   * - zoom < 17: 不显示节点 (Rust 侧已过滤)
+   * - zoom 17-18: 优先节点 (ref_count >= 2) 显示为红色小方框
+   * - zoom 19-20: 优先节点红色方框 + 普通节点红点
+   * - zoom >= 21: 优先节点红色方框 + 普通节点红色小圆圈
    */
   private renderNodes(): void {
     if (this.nodes.length === 0) {
-      // console.log('renderNodes: 无节点数据')
       return
     }
-    console.log(`renderNodes: 渲染 ${this.nodes.length} 个节点, zoom=${this.camera.zoom.toFixed(1)}`)
 
     const { ctx } = this
     const zoom = this.camera.zoom
 
-    // LOD 样式配置
-    const isHighZoom = zoom >= 17
-    const baseRadius = isHighZoom ? 4 : 2
-    const radius = Math.max(1, baseRadius * Math.min(1, zoom / 16))
-
-    // 节点颜色: 红色系，高优先级 (连接多路径) 更深
     const highPriorityColor = '#f44336' // 红色
     const normalColor = '#ef9a9a' // 浅红色
+    const size = Math.max(2, 3 * Math.min(1.5, zoom / 18))
 
     for (const node of this.nodes) {
-      const { x, y } = this.lonLatToScreen(node.lon, node.lat)
-
-      // 根据引用计数决定样式
+      // 节点数据已经是墨卡托坐标，直接转换为屏幕坐标
+      const { x, y } = this.mercatorToScreen(node.x, node.y)
       const isHighPriority = node.refCount >= 2
-      const color = isHighPriority ? highPriorityColor : normalColor
-      const nodeRadius = isHighPriority ? radius * 1.5 : radius
 
-      ctx.beginPath()
-      ctx.arc(x, y, nodeRadius, 0, Math.PI * 2)
-
-      if (isHighZoom) {
-        // 高缩放: 红色圆圈 (描边)
-        ctx.strokeStyle = color
-        ctx.lineWidth = isHighPriority ? 2 : 1
+      if (isHighPriority) {
+        // 优先节点: 红色小方框 (所有缩放级别)
+        const halfSize = size * 0.8
+        ctx.strokeStyle = highPriorityColor
+        ctx.lineWidth = 1.5
+        ctx.strokeRect(x - halfSize, y - halfSize, halfSize * 2, halfSize * 2)
+      } else if (zoom >= 21) {
+        // zoom >= 21: 普通节点显示为红色小圆圈
+        ctx.beginPath()
+        ctx.arc(x, y, size * 0.6, 0, Math.PI * 2)
+        ctx.strokeStyle = normalColor
+        ctx.lineWidth = 1
         ctx.stroke()
-      } else {
-        // 中缩放: 红点 (填充)
-        ctx.fillStyle = color
+      } else if (zoom >= 19) {
+        // zoom 19-20: 普通节点显示为红点
+        ctx.beginPath()
+        ctx.arc(x, y, size * 0.5, 0, Math.PI * 2)
+        ctx.fillStyle = normalColor
         ctx.fill()
       }
+      // zoom 17-18: 只有优先节点会被 Rust 端返回
     }
   }
 
@@ -409,12 +448,13 @@ export class MapRenderer {
       ctx.beginPath()
 
       for (let p = 0; p < pointCount; p++) {
-        const lon = view.getFloat64(offset, true)
+        // 数据已经是墨卡托坐标（米）
+        const mercX = view.getFloat64(offset, true)
         offset += 8
-        const lat = view.getFloat64(offset, true)
+        const mercY = view.getFloat64(offset, true)
         offset += 8
 
-        const { x, y } = this.lonLatToScreen(lon, lat)
+        const { x, y } = this.mercatorToScreen(mercX, mercY)
 
         if (p === 0) {
           ctx.moveTo(x, y)

@@ -21,6 +21,7 @@
 //! ```
 
 use crate::osm_store::{OsmNode, OsmStore};
+use crate::projection::lonlat_to_mercator;
 use crate::spatial_query::NodeWithPriority;
 use bytemuck::{Pod, Zeroable};
 
@@ -44,12 +45,13 @@ impl From<&OsmNode> for NodeBinary {
 }
 
 /// 带优先级的节点二进制表示 (24 字节，内存对齐)
-/// 格式: [lon: f64][lat: f64][ref_count: u16][_pad: u16][_pad2: u32]
+/// 格式: [x: f64][y: f64][ref_count: u16][_pad: u16][_pad2: u32]
+/// 注意：x, y 是 Web 墨卡托投影坐标（单位：米）
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct NodePriorityBinary {
-    pub lon: f64,       // 8 bytes
-    pub lat: f64,       // 8 bytes
+    pub x: f64,         // 8 bytes - 墨卡托 X (米)
+    pub y: f64,         // 8 bytes - 墨卡托 Y (米)
     pub ref_count: u16, // 2 bytes
     pub _pad: u16,      // 2 bytes padding
     pub _pad2: u32,     // 4 bytes padding (total = 24)
@@ -57,9 +59,11 @@ pub struct NodePriorityBinary {
 
 impl From<&NodeWithPriority> for NodePriorityBinary {
     fn from(node: &NodeWithPriority) -> Self {
+        // 应用 Web 墨卡托投影
+        let (x, y) = lonlat_to_mercator(node.lon, node.lat);
         Self {
-            lon: node.lon,
-            lat: node.lat,
+            x,
+            y,
             ref_count: node.ref_count,
             _pad: 0,
             _pad2: 0,
@@ -89,12 +93,13 @@ pub fn encode_coordinates(nodes: &[OsmNode]) -> Vec<u8> {
     buffer
 }
 
-/// 紧凑型 Way 几何序列化
+/// 紧凑型 Way 几何序列化（Web 墨卡托投影）
 ///
-/// 后端完成几何组装：查询 Way 的 node_refs，从 DashMap 获取坐标，拍平为连续字节流。
+/// 后端完成几何组装：查询 Way 的 node_refs，从 DashMap 获取坐标，
+/// **应用 Web 墨卡托投影**，然后拍平为连续字节流。
 /// 缺失的 Node 会被跳过（PBF 截断场景）。
 ///
-/// 格式: [total_ways: u32][way_1_point_count: u32][coords...][way_2_point_count: u32][coords...]...
+/// 格式: [total_ways: u32][way_1_point_count: u32][x,y coords in meters...]...
 pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
     let mut buffer = Vec::with_capacity(4 + way_ids.len() * 64);
     let mut valid_way_count: u32 = 0;
@@ -109,12 +114,15 @@ pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
             None => continue,
         };
 
-        // 收集有效坐标
+        // 收集有效坐标并应用投影
         let coords: Vec<(f64, f64)> = way
             .node_refs
             .iter()
             .filter_map(|node_id| {
-                store.nodes.get(node_id).map(|n| (n.lon, n.lat))
+                store.nodes.get(node_id).map(|n| {
+                    // 应用 Web 墨卡托投影
+                    lonlat_to_mercator(n.lon, n.lat)
+                })
             })
             .collect();
 
@@ -126,10 +134,10 @@ pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
         // 写入点数量
         buffer.extend_from_slice(&(coords.len() as u32).to_le_bytes());
 
-        // 写入坐标
-        for (lon, lat) in coords {
-            buffer.extend_from_slice(&lon.to_le_bytes());
-            buffer.extend_from_slice(&lat.to_le_bytes());
+        // 写入投影后的坐标（单位：米）
+        for (x, y) in coords {
+            buffer.extend_from_slice(&x.to_le_bytes());
+            buffer.extend_from_slice(&y.to_le_bytes());
         }
 
         valid_way_count += 1;

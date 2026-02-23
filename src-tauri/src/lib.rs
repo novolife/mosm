@@ -5,6 +5,7 @@
 mod binary_protocol;
 mod osm_store;
 mod pbf_parser;
+mod projection;
 mod spatial_query;
 
 use osm_store::OsmStore;
@@ -12,6 +13,7 @@ use spatial_query::Viewport;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::State;
+
 
 /// 全局应用状态
 pub struct AppState {
@@ -79,46 +81,14 @@ fn query_viewport_coords(viewport: Viewport, state: State<AppState>) -> Vec<u8> 
 /// - Way geometry: [total_ways][point_count][coords...]...
 #[tauri::command]
 fn query_viewport_full(viewport: Viewport, state: State<AppState>) -> Vec<u8> {
-    eprintln!(
-        "查询视口: lon=[{:.4}, {:.4}], lat=[{:.4}, {:.4}], zoom={:.1}",
-        viewport.min_lon, viewport.max_lon, viewport.min_lat, viewport.max_lat, viewport.zoom
-    );
-
-    // 调试: 检查 node_ref_count 状态
-    let ref_count_size = state.store.node_ref_count.len();
-    let nodes_with_refs: usize = state.store.node_ref_count.iter().filter(|r| *r.value() >= 1).count();
-    eprintln!(
-        "调试: node_ref_count 共 {} 条, >=1 引用的节点 {} 个",
-        ref_count_size, nodes_with_refs
-    );
-
     let result = spatial_query::query_viewport(&state.store, &viewport);
 
-    eprintln!(
-        "查询结果: {} 节点, {} 路径, truncated={}",
-        result.nodes.len(),
-        result.way_ids.len(),
-        result.truncated
-    );
-
-    if !result.nodes.is_empty() {
-        let first = &result.nodes[0];
-        let last = &result.nodes[result.nodes.len() - 1];
-        eprintln!(
-            "节点范例: first=({:.4}, {:.4}, refs={}), last=({:.4}, {:.4}, refs={})",
-            first.lon, first.lat, first.ref_count, last.lon, last.lat, last.ref_count
-        );
-    }
-
-    let response = binary_protocol::build_viewport_response_v3(
+    binary_protocol::build_viewport_response_v3(
         &state.store,
         &result.nodes,
         &result.way_ids,
         result.truncated,
-    );
-
-    eprintln!("响应大小: {} 字节", response.len());
-    response
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

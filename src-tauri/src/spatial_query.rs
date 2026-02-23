@@ -80,19 +80,25 @@ pub struct NodeLodConfig {
 
 fn get_node_lod_config(zoom: f32) -> NodeLodConfig {
     match zoom as u32 {
-        // 低缩放：不显示节点
-        0..=13 => NodeLodConfig {
+        // 低缩放 (0-16): 不显示节点
+        0..=16 => NodeLodConfig {
             show_nodes: false,
             min_ref_count: 0,
             max_nodes: 0,
         },
-        // 中缩放 (14-16): 显示所有节点（临时禁用 ref_count 过滤以调试）
-        14..=16 => NodeLodConfig {
+        // 中缩放 (17-18): 只显示优先节点 (ref_count >= 2)
+        17..=18 => NodeLodConfig {
             show_nodes: true,
-            min_ref_count: 0, // 暂时设为 0 以调试
+            min_ref_count: 2,
             max_nodes: 50_000,
         },
-        // 高缩放 (17+): 显示所有节点
+        // 高缩放 (19-20): 显示所有节点
+        19..=20 => NodeLodConfig {
+            show_nodes: true,
+            min_ref_count: 0,
+            max_nodes: 100_000,
+        },
+        // 超高缩放 (21+): 显示所有节点，更多数量
         _ => NodeLodConfig {
             show_nodes: true,
             min_ref_count: 0,
@@ -106,11 +112,6 @@ pub fn query_viewport(store: &OsmStore, viewport: &Viewport) -> ViewportQueryRes
     let (_, max_ways) = get_render_limits(viewport.zoom);
     let node_lod = get_node_lod_config(viewport.zoom);
 
-    eprintln!(
-        "LOD 配置: show_nodes={}, min_ref_count={}, max_nodes={}",
-        node_lod.show_nodes, node_lod.min_ref_count, node_lod.max_nodes
-    );
-
     // 查询节点 (根据 LOD 配置)
     let mut nodes: Vec<NodeWithPriority> = if node_lod.show_nodes {
         let raw_nodes = store.query_nodes_in_viewport(
@@ -119,8 +120,6 @@ pub fn query_viewport(store: &OsmStore, viewport: &Viewport) -> ViewportQueryRes
             viewport.max_lon,
             viewport.max_lat,
         );
-
-        eprintln!("R-Tree 查询返回 {} 个原始节点", raw_nodes.len());
 
         // 转换为带优先级的节点，并过滤低引用计数
         let mut prioritized: Vec<NodeWithPriority> = raw_nodes
@@ -145,13 +144,10 @@ pub fn query_viewport(store: &OsmStore, viewport: &Viewport) -> ViewportQueryRes
             })
             .collect();
 
-        eprintln!("过滤后剩余 {} 个节点", prioritized.len());
-
         // 按引用计数降序排序 (连接多路径的优先)
         prioritized.sort_by(|a, b| b.ref_count.cmp(&a.ref_count));
         prioritized
     } else {
-        eprintln!("LOD: 不显示节点");
         Vec::new()
     };
 
