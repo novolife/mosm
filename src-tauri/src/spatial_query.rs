@@ -63,7 +63,9 @@ fn get_render_limits(zoom: f32) -> (usize, usize) {
         9..=11 => (30_000, 15_000),
         12..=14 => (80_000, 40_000),
         15..=17 => (150_000, 80_000),
-        _ => (300_000, 150_000),
+        18..=21 => (300_000, 150_000),
+        22..=24 => (500_000, 250_000),
+        _ => (800_000, 400_000), // zoom 25+
     }
 }
 
@@ -80,29 +82,29 @@ pub struct NodeLodConfig {
 
 fn get_node_lod_config(zoom: f32) -> NodeLodConfig {
     match zoom as u32 {
-        // 低缩放 (0-16): 不显示节点
-        0..=16 => NodeLodConfig {
+        // 低缩放 (0-17): 不显示节点
+        0..=17 => NodeLodConfig {
             show_nodes: false,
             min_ref_count: 0,
             max_nodes: 0,
         },
-        // 中缩放 (17-18): 只显示优先节点 (ref_count >= 2)
-        17..=18 => NodeLodConfig {
+        // 中缩放 (18-19): 只显示优先节点 (ref_count >= 2)
+        18..=19 => NodeLodConfig {
             show_nodes: true,
             min_ref_count: 2,
             max_nodes: 50_000,
         },
-        // 高缩放 (19-20): 显示所有节点
-        19..=20 => NodeLodConfig {
+        // 高缩放 (20-21): 优先节点 + 普通节点
+        20..=21 => NodeLodConfig {
             show_nodes: true,
             min_ref_count: 0,
             max_nodes: 100_000,
         },
-        // 超高缩放 (21+): 显示所有节点，更多数量
+        // 超高缩放 (22+): 显示所有节点，更多数量
         _ => NodeLodConfig {
             show_nodes: true,
             min_ref_count: 0,
-            max_nodes: 200_000,
+            max_nodes: 300_000,
         },
     }
 }

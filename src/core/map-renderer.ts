@@ -270,7 +270,7 @@ export class MapRenderer {
   /** 缩放 */
   zoomAt(delta: number, screenX: number, screenY: number): void {
     const oldZoom = this.camera.zoom
-    const newZoom = Math.max(1, Math.min(22, oldZoom + delta))
+    const newZoom = Math.max(1, Math.min(26, oldZoom + delta))
 
     if (newZoom === oldZoom) return
 
@@ -372,10 +372,15 @@ export class MapRenderer {
   /**
    * 渲染节点 (LOD 策略)
    *
-   * - zoom < 17: 不显示节点 (Rust 侧已过滤)
-   * - zoom 17-18: 优先节点 (ref_count >= 2) 显示为红色小方框
-   * - zoom 19-20: 优先节点红色方框 + 普通节点红点
-   * - zoom >= 21: 优先节点红色方框 + 普通节点红色小圆圈
+   * 优先节点 (ref_count >= 2):
+   * - zoom < 18: 不显示
+   * - zoom 18-19: 红点
+   * - zoom >= 20: 红色方框
+   *
+   * 普通节点:
+   * - zoom < 20: 不显示
+   * - zoom 20-21: 红点
+   * - zoom >= 22: 红色圆框
    */
   private renderNodes(): void {
     if (this.nodes.length === 0) {
@@ -387,34 +392,44 @@ export class MapRenderer {
 
     const highPriorityColor = '#f44336' // 红色
     const normalColor = '#ef9a9a' // 浅红色
-    const size = Math.max(2, 3 * Math.min(1.5, zoom / 18))
+    const size = Math.max(2, 3 * Math.min(1.5, zoom / 20))
 
     for (const node of this.nodes) {
-      // 节点数据已经是墨卡托坐标，直接转换为屏幕坐标
       const { x, y } = this.mercatorToScreen(node.x, node.y)
       const isHighPriority = node.refCount >= 2
 
       if (isHighPriority) {
-        // 优先节点: 红色小方框 (所有缩放级别)
-        const halfSize = size * 0.8
-        ctx.strokeStyle = highPriorityColor
-        ctx.lineWidth = 1.5
-        ctx.strokeRect(x - halfSize, y - halfSize, halfSize * 2, halfSize * 2)
-      } else if (zoom >= 21) {
-        // zoom >= 21: 普通节点显示为红色小圆圈
-        ctx.beginPath()
-        ctx.arc(x, y, size * 0.6, 0, Math.PI * 2)
-        ctx.strokeStyle = normalColor
-        ctx.lineWidth = 1
-        ctx.stroke()
-      } else if (zoom >= 19) {
-        // zoom 19-20: 普通节点显示为红点
-        ctx.beginPath()
-        ctx.arc(x, y, size * 0.5, 0, Math.PI * 2)
-        ctx.fillStyle = normalColor
-        ctx.fill()
+        // 优先节点
+        if (zoom >= 20) {
+          // zoom >= 20: 红色方框
+          const halfSize = size * 0.8
+          ctx.strokeStyle = highPriorityColor
+          ctx.lineWidth = 1.5
+          ctx.strokeRect(x - halfSize, y - halfSize, halfSize * 2, halfSize * 2)
+        } else {
+          // zoom 18-19: 红点
+          ctx.beginPath()
+          ctx.arc(x, y, size * 0.5, 0, Math.PI * 2)
+          ctx.fillStyle = highPriorityColor
+          ctx.fill()
+        }
+      } else {
+        // 普通节点 (只有 zoom >= 20 时 Rust 才会返回)
+        if (zoom >= 22) {
+          // zoom >= 22: 红色圆框
+          ctx.beginPath()
+          ctx.arc(x, y, size * 0.6, 0, Math.PI * 2)
+          ctx.strokeStyle = normalColor
+          ctx.lineWidth = 1
+          ctx.stroke()
+        } else {
+          // zoom 20-21: 红点
+          ctx.beginPath()
+          ctx.arc(x, y, size * 0.4, 0, Math.PI * 2)
+          ctx.fillStyle = normalColor
+          ctx.fill()
+        }
       }
-      // zoom 17-18: 只有优先节点会被 Rust 端返回
     }
   }
 
