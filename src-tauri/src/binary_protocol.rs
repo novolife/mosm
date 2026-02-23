@@ -340,8 +340,8 @@ mod tests {
     #[test]
     fn test_encode_nodes() {
         let nodes = vec![
-            OsmNode { id: 1, lat: 51.5074, lon: -0.1278 },
-            OsmNode { id: 2, lat: 48.8566, lon: 2.3522 },
+            OsmNode { id: 1, lat: 51.5074, lon: -0.1278, tags: vec![] },
+            OsmNode { id: 2, lat: 48.8566, lon: 2.3522, tags: vec![] },
         ];
         let bytes = encode_nodes(&nodes);
         assert_eq!(bytes.len(), 48);

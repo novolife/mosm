@@ -317,3 +317,43 @@ export async function getNodeDetails(nodeId: number): Promise<FeatureDetails> {
 export async function getWayDetails(wayId: number): Promise<FeatureDetails> {
   return await invoke<FeatureDetails>('get_way_details', { wayId })
 }
+
+// ============================================================================
+// 标签编辑 (Tag CRUD)
+// ============================================================================
+
+/** 标签更新结果 */
+export interface UpdateTagsResult {
+  success: boolean
+  render_feature: number
+  layer: number
+  is_area: boolean
+}
+
+/**
+ * 更新路径标签
+ *
+ * @param wayId 路径 ID
+ * @param newTags 新的标签数组
+ * @returns 更新结果，包含新的 render_feature 用于判断是否需要重绘
+ */
+export async function updateWayTags(
+  wayId: number,
+  newTags: [string, string][],
+): Promise<UpdateTagsResult> {
+  return await invoke<UpdateTagsResult>('update_way_tags', { wayId, newTags })
+}
+
+/**
+ * 更新节点标签
+ *
+ * @param nodeId 节点 ID
+ * @param newTags 新的标签数组
+ * @returns 更新结果
+ */
+export async function updateNodeTags(
+  nodeId: number,
+  newTags: [string, string][],
+): Promise<UpdateTagsResult> {
+  return await invoke<UpdateTagsResult>('update_node_tags', { nodeId, newTags })
+}

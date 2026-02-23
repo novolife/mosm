@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { FeatureDetails } from '../core/ipc-bridge'
+import { updateWayTags, updateNodeTags } from '../core/ipc-bridge'
 
 const props = defineProps<{
   feature: FeatureDetails | null
@@ -8,7 +9,36 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
+  tagsUpdated: [renderFeatureChanged: boolean]
 }>()
+
+// 保存状态
+const isSaving = ref(false)
+
+// 可编辑的标签副本
+const editableTags = ref<{ key: string; value: string }[]>([])
+
+// 记录原始渲染特征，用于判断是否需要重绘
+let originalRenderFeature = 0
+
+// 同步原始标签到可编辑副本
+watch(
+  () => props.feature,
+  (newFeature) => {
+    if (newFeature && newFeature.type !== 'NotFound') {
+      editableTags.value = (newFeature.tags || []).map(([key, value]) => ({
+        key,
+        value,
+      }))
+      if (newFeature.type === 'Way') {
+        originalRenderFeature = newFeature.render_feature
+      }
+    } else {
+      editableTags.value = []
+    }
+  },
+  { immediate: true },
+)
 
 const featureType = computed(() => {
   if (!props.feature || props.feature.type === 'NotFound') return null
@@ -18,11 +48,6 @@ const featureType = computed(() => {
 const featureId = computed(() => {
   if (!props.feature || props.feature.type === 'NotFound') return null
   return props.feature.id
-})
-
-const tags = computed(() => {
-  if (!props.feature || props.feature.type === 'NotFound') return []
-  return props.feature.tags || []
 })
 
 const nodeInfo = computed(() => {
@@ -48,9 +73,10 @@ const parentRelations = computed(() => {
   return props.feature.parent_relations || []
 })
 
-function formatTagKey(key: string): string {
-  return key.replace(/_/g, ' ').replace(/:/g, ': ')
-}
+// 是否可编辑（Node 和 Way 都支持）
+const canEdit = computed(() => {
+  return props.feature?.type === 'Way' || props.feature?.type === 'Node'
+})
 
 function formatRelationType(type: string | null): string {
   if (!type) return '未知类型'
@@ -67,6 +93,81 @@ function formatRelationType(type: string | null): string {
     enforcement: '执法',
   }
   return typeMap[type] || type
+}
+
+function addTag() {
+  editableTags.value.push({ key: '', value: '' })
+}
+
+async function removeTag(index: number) {
+  editableTags.value.splice(index, 1)
+  // 删除后立即保存
+  await saveTagsQuietly()
+}
+
+// 静默保存标签（失去焦点或删除时调用）
+async function saveTagsQuietly() {
+  if (!props.feature || props.feature.type === 'NotFound') return
+  if (isSaving.value) return
+
+  // 检查是否有正在编辑的不完整标签（key有值但value为空，或反之）
+  const hasIncompleteTag = editableTags.value.some(
+    (tag) => (tag.key.trim() !== '' && tag.value.trim() === '') ||
+             (tag.key.trim() === '' && tag.value.trim() !== '')
+  )
+
+  // 如果有不完整的标签，跳过保存（用户可能还在编辑）
+  if (hasIncompleteTag) {
+    return
+  }
+
+  // 过滤掉空的标签
+  const validTags = editableTags.value.filter(
+    (tag) => tag.key.trim() !== '' && tag.value.trim() !== '',
+  )
+
+  isSaving.value = true
+
+  try {
+    let result
+    if (props.feature.type === 'Way') {
+      result = await updateWayTags(
+        props.feature.id,
+        validTags.map((tag) => [tag.key.trim(), tag.value.trim()]),
+      )
+
+      if (result.success) {
+        // Way: 判断渲染特征是否改变
+        const renderFeatureChanged = result.render_feature !== originalRenderFeature
+        originalRenderFeature = result.render_feature
+        emit('tagsUpdated', renderFeatureChanged)
+      }
+    } else if (props.feature.type === 'Node') {
+      result = await updateNodeTags(
+        props.feature.id,
+        validTags.map((tag) => [tag.key.trim(), tag.value.trim()]),
+      )
+
+      if (result.success) {
+        // Node: 标签不影响渲染，不需要重绘
+        emit('tagsUpdated', false)
+      }
+    }
+  } catch (error) {
+    console.error('保存标签出错:', error)
+  } finally {
+    isSaving.value = false
+  }
+}
+
+// 输入框失去焦点时保存
+function handleBlur() {
+  saveTagsQuietly()
+}
+
+// 回车键时移出焦点并保存
+function handleKeyEnter(event: KeyboardEvent) {
+  ;(event.target as HTMLInputElement).blur()
 }
 </script>
 
@@ -121,23 +222,49 @@ function formatRelationType(type: string | null): string {
         </div>
       </div>
 
-      <!-- 标签列表 -->
-      <div v-if="tags.length > 0" class="info-section tags-section">
-        <div class="section-title">标签 ({{ tags.length }})</div>
-        <div class="tags-list">
-          <div v-for="([key, value], index) in tags" :key="index" class="tag-item">
-            <span class="tag-key">{{ formatTagKey(key) }}</span>
-            <span class="tag-value">{{ value }}</span>
-          </div>
+      <!-- 标签编辑器（实时编辑） -->
+      <div class="info-section tags-section">
+        <div class="section-header">
+          <span class="section-title">标签 ({{ editableTags.length }})</span>
+          <span v-if="isSaving" class="saving-indicator">保存中...</span>
         </div>
-      </div>
 
-      <div v-else-if="featureType === 'Node'" class="empty-tags">
-        此节点没有标签
-      </div>
+        <!-- Way 可编辑 -->
+        <div v-if="canEdit" class="tags-editor">
+          <div
+            v-for="(tag, index) in editableTags"
+            :key="index"
+            class="tag-edit-row"
+          >
+            <input
+              v-model="tag.key"
+              type="text"
+              class="tag-input key-input"
+              placeholder="键"
+              @blur="handleBlur"
+              @keydown.enter="handleKeyEnter"
+            />
+            <span class="tag-separator">=</span>
+            <input
+              v-model="tag.value"
+              type="text"
+              class="tag-input value-input"
+              placeholder="值"
+              @blur="handleBlur"
+              @keydown.enter="handleKeyEnter"
+            />
+            <button class="tag-delete-btn" @click="removeTag(index)" title="删除标签">
+              ×
+            </button>
+          </div>
+          <button class="add-tag-btn" @click="addTag">
+            + 添加标签
+          </button>
+        </div>
 
-      <div v-else-if="featureType === 'Way' && tags.length === 0" class="empty-tags">
-        此路径没有标签
+        <div v-else class="empty-tags">
+          {{ featureType === 'Node' ? '此节点没有标签' : '此路径没有标签' }}
+        </div>
       </div>
 
       <!-- 所属关系 -->
@@ -159,11 +286,6 @@ function formatRelationType(type: string | null): string {
       </div>
     </div>
 
-    <div class="panel-footer">
-      <button class="action-btn" disabled title="编辑标签（开发中）">
-        编辑标签
-      </button>
-    </div>
   </div>
 </template>
 
@@ -243,13 +365,25 @@ function formatRelationType(type: string | null): string {
   margin-bottom: 16px;
 }
 
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
 .section-title {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   color: var(--color-text-muted);
-  margin-bottom: 8px;
   letter-spacing: 0.5px;
+}
+
+.saving-indicator {
+  font-size: 10px;
+  color: var(--color-accent);
+  font-style: italic;
 }
 
 .info-grid {
@@ -386,24 +520,84 @@ function formatRelationType(type: string | null): string {
   border-radius: 2px;
 }
 
-.panel-footer {
-  padding: 12px;
-  border-top: 1px solid var(--color-border);
+/* 标签编辑器样式 */
+.tags-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.action-btn {
-  width: 100%;
-  padding: 8px 12px;
+.tag-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tag-input {
+  flex: 1;
+  padding: 6px 8px;
   border: 1px solid var(--color-border);
-  background: var(--color-bg-tertiary);
-  color: var(--color-text-secondary);
   border-radius: 4px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
   font-size: 12px;
-  cursor: not-allowed;
+  font-family: var(--font-mono);
 }
 
-.action-btn:not(:disabled):hover {
-  background: var(--color-bg-hover);
+.tag-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.key-input {
+  flex: 0.8;
+}
+
+.value-input {
+  flex: 1.2;
+}
+
+.tag-separator {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.tag-delete-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 16px;
   cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.tag-delete-btn:hover {
+  background: rgba(244, 67, 54, 0.2);
+  color: #f44336;
+}
+
+.add-tag-btn {
+  margin-top: 4px;
+  padding: 6px 12px;
+  border: 1px dashed var(--color-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.add-tag-btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: var(--color-accent-subtle);
 }
 </style>

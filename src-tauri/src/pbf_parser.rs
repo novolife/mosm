@@ -44,19 +44,29 @@ pub fn parse_pbf_file(path: &Path, store: Arc<OsmStore>) -> Result<ParseProgress
     reader
         .for_each(|element| match element {
             Element::Node(node) => {
+                let tags: Vec<(String, String)> = node
+                    .tags()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
                 let osm_node = OsmNode {
                     id: node.id(),
                     lat: node.lat(),
                     lon: node.lon(),
+                    tags,
                 };
                 store.insert_node(osm_node);
                 nodes_parsed += 1;
             }
             Element::DenseNode(node) => {
+                let tags: Vec<(String, String)> = node
+                    .tags()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
                 let osm_node = OsmNode {
                     id: node.id(),
                     lat: node.lat(),
                     lon: node.lon(),
+                    tags,
                 };
                 store.insert_node(osm_node);
                 nodes_parsed += 1;
@@ -128,19 +138,29 @@ pub fn parse_pbf_parallel(path: &Path, store: Arc<OsmStore>) -> Result<ParseProg
             |element| {
                 match element {
                     Element::Node(node) => {
+                        let tags: Vec<(String, String)> = node
+                            .tags()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect();
                         let osm_node = OsmNode {
                             id: node.id(),
                             lat: node.lat(),
                             lon: node.lon(),
+                            tags,
                         };
                         store_ref.insert_node(osm_node);
                         (1u64, 0u64, 0u64)
                     }
                     Element::DenseNode(node) => {
+                        let tags: Vec<(String, String)> = node
+                            .tags()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect();
                         let osm_node = OsmNode {
                             id: node.id(),
                             lat: node.lat(),
                             lon: node.lon(),
+                            tags,
                         };
                         store_ref.insert_node(osm_node);
                         (1, 0, 0)

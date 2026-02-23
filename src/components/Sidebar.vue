@@ -20,7 +20,12 @@ const { selectedFeature } = defineProps<{
 const emit = defineEmits<{
   (e: 'data-loaded', bounds: DataBounds | null): void
   (e: 'clear-selection'): void
+  (e: 'tags-updated', renderFeatureChanged: boolean): void
 }>()
+
+const handleTagsUpdated = (renderFeatureChanged: boolean) => {
+  emit('tags-updated', renderFeatureChanged)
+}
 
 const { stats, isLoading, loadProgress, error, refreshStats, openPbfFile } = useOsmStore()
 
@@ -55,7 +60,11 @@ onMounted(() => {
   <aside class="sidebar">
     <!-- 选中要素时显示要素详情面板 -->
     <template v-if="selectedFeature && selectedFeature.type !== 'NotFound'">
-      <FeaturePanel :feature="selectedFeature" @close="handleCloseFeaturePanel" />
+      <FeaturePanel
+        :feature="selectedFeature"
+        @close="handleCloseFeaturePanel"
+        @tags-updated="handleTagsUpdated"
+      />
     </template>
 
     <!-- 未选中要素时显示默认界面 -->

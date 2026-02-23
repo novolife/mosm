@@ -51,6 +51,29 @@ const handleClearSelection = () => {
   selectedFeatureDetails.value = null
 }
 
+// 处理标签更新
+const handleTagsUpdated = async (renderFeatureChanged: boolean) => {
+  // 刷新要素详情
+  const feature = mapRef.value?.selectedFeature
+  if (feature) {
+    try {
+      if (feature.type === 'node') {
+        selectedFeatureDetails.value = await getNodeDetails(feature.id)
+      } else if (feature.type === 'way') {
+        selectedFeatureDetails.value = await getWayDetails(feature.id)
+      }
+    } catch (error) {
+      console.error('刷新要素详情失败:', error)
+    }
+  }
+
+  // 如果渲染特征改变，触发重绘
+  if (renderFeatureChanged) {
+    console.log('渲染特征已改变，触发重绘')
+    mapRef.value?.fetchData()
+  }
+}
+
 // 右键菜单项配置
 const mapContextMenuItems: MenuItem[] = [
   { id: 'add-node', label: '添加节点', shortcut: 'N' },
@@ -153,6 +176,7 @@ const handleDataLoaded = (bounds: DataBounds | null) => {
             :selected-feature="selectedFeatureDetails"
             @data-loaded="handleDataLoaded"
             @clear-selection="handleClearSelection"
+            @tags-updated="handleTagsUpdated"
           />
         </Pane>
         <Pane :size="80">

@@ -218,7 +218,7 @@ fn get_node_details(node_id: i64, state: State<AppState>) -> FeatureDetails {
             id: node.id,
             lon: node.lon,
             lat: node.lat,
-            tags: vec![], // Node 通常没有 tags，但保留接口
+            tags: node.tags.clone(),
             ref_count,
             parent_relations,
         })
@@ -248,6 +248,92 @@ fn get_way_details(way_id: i64, state: State<AppState>) -> FeatureDetails {
     }
 }
 
+/// 标签更新结果
+#[derive(serde::Serialize)]
+struct UpdateTagsResult {
+    success: bool,
+    render_feature: u16,
+    layer: i8,
+    is_area: bool,
+}
+
+/// 更新路径标签
+///
+/// 更新 Way 的标签，并重新计算 RenderFeature
+/// 返回新的 render_feature 以便前端判断是否需要重绘
+#[tauri::command]
+fn update_way_tags(
+    way_id: i64,
+    new_tags: Vec<(String, String)>,
+    state: State<AppState>,
+) -> UpdateTagsResult {
+    if let Some(mut way) = state.store.ways.get_mut(&way_id) {
+        // 更新标签
+        way.tags = new_tags.clone();
+
+        // 重新计算 RenderFeature
+        let parsed = render_feature::parse_tags(&new_tags);
+        way.render_feature = parsed.feature;
+        way.layer = parsed.layer;
+
+        // 重新判断是否为闭合面
+        let is_closed = way.node_refs.len() >= 4
+            && way.node_refs.first() == way.node_refs.last();
+
+        // 检查是否有 area=yes 标签或特定的面类型标签
+        let has_area_tag = new_tags.iter().any(|(k, v)| {
+            k == "area" && v == "yes"
+                || k == "building"
+                || k == "landuse"
+                || k == "natural"
+                || k == "leisure"
+                || k == "amenity"
+        });
+
+        way.is_area = is_closed && has_area_tag;
+
+        UpdateTagsResult {
+            success: true,
+            render_feature: way.render_feature,
+            layer: way.layer,
+            is_area: way.is_area,
+        }
+    } else {
+        UpdateTagsResult {
+            success: false,
+            render_feature: 0,
+            layer: 0,
+            is_area: false,
+        }
+    }
+}
+
+/// 更新节点标签
+#[tauri::command]
+fn update_node_tags(
+    node_id: i64,
+    new_tags: Vec<(String, String)>,
+    state: State<AppState>,
+) -> UpdateTagsResult {
+    if let Some(mut node) = state.store.nodes.get_mut(&node_id) {
+        node.tags = new_tags;
+
+        UpdateTagsResult {
+            success: true,
+            render_feature: 0,
+            layer: 0,
+            is_area: false,
+        }
+    } else {
+        UpdateTagsResult {
+            success: false,
+            render_feature: 0,
+            layer: 0,
+            is_area: false,
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -264,6 +350,8 @@ pub fn run() {
             pick_feature,
             get_node_details,
             get_way_details,
+            update_way_tags,
+            update_node_tags,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

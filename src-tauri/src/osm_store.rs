@@ -11,11 +11,12 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// OSM 节点 (Node) - 地图上的一个坐标点
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OsmNode {
     pub id: i64,
     pub lat: f64,
     pub lon: f64,
+    pub tags: Vec<(String, String)>,
 }
 
 /// OSM 路径 (Way) - 由多个节点组成的线或面
@@ -198,7 +199,7 @@ impl OsmStore {
 
         index
             .locate_in_envelope_intersecting(&query_box)
-            .filter_map(|entry| self.nodes.get(&entry.id).map(|n| *n))
+            .filter_map(|entry| self.nodes.get(&entry.id).map(|n| n.clone()))
             .collect()
     }
 
