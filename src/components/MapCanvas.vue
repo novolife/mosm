@@ -15,9 +15,11 @@ const {
   camera,
   stats,
   isLoading,
+  selectedFeature,
   setCamera,
   fetchData,
   resize,
+  clearSelection,
 } = useMapRenderer(() => canvasRef.value)
 
 defineExpose({
@@ -25,9 +27,11 @@ defineExpose({
   camera,
   stats,
   isLoading,
+  selectedFeature,
   setCamera,
   fetchData,
   resize,
+  clearSelection,
 })
 </script>
 

@@ -11,9 +11,77 @@ import 'splitpanes/dist/splitpanes.css'
 import Sidebar from './components/Sidebar.vue'
 import Toolbar from './components/Toolbar.vue'
 import MapCanvas from './components/MapCanvas.vue'
-import { ref } from 'vue'
+import ContextMenu from './components/ContextMenu.vue'
+import type { MenuItem } from './components/ContextMenu.vue'
+import { ref, watch } from 'vue'
+import { getNodeDetails, getWayDetails, type FeatureDetails } from './core/ipc-bridge'
 
 const mapRef = ref<InstanceType<typeof MapCanvas> | null>(null)
+const contextMenuRef = ref<InstanceType<typeof ContextMenu> | null>(null)
+
+// 选中要素的详细信息
+const selectedFeatureDetails = ref<FeatureDetails | null>(null)
+
+// 监听 MapCanvas 的选中状态变化
+watch(
+  () => mapRef.value?.selectedFeature,
+  async (newFeature) => {
+    if (!newFeature) {
+      selectedFeatureDetails.value = null
+      return
+    }
+
+    try {
+      if (newFeature.type === 'node') {
+        selectedFeatureDetails.value = await getNodeDetails(newFeature.id)
+      } else if (newFeature.type === 'way') {
+        selectedFeatureDetails.value = await getWayDetails(newFeature.id)
+      }
+    } catch (error) {
+      console.error('获取要素详情失败:', error)
+      selectedFeatureDetails.value = null
+    }
+  },
+  { deep: true },
+)
+
+// 清除选中状态
+const handleClearSelection = () => {
+  mapRef.value?.clearSelection()
+  selectedFeatureDetails.value = null
+}
+
+// 右键菜单项配置
+const mapContextMenuItems: MenuItem[] = [
+  { id: 'add-node', label: '添加节点', shortcut: 'N' },
+  { id: 'add-way', label: '添加路径', shortcut: 'W' },
+  { id: 'separator-1', label: '', separator: true },
+  { id: 'select-all', label: '全选', shortcut: 'Ctrl+A' },
+  { id: 'separator-2', label: '', separator: true },
+  { id: 'properties', label: '属性', shortcut: 'Alt+Enter' },
+]
+
+// 处理地图区域右键
+const handleMapContextMenu = (e: MouseEvent) => {
+  contextMenuRef.value?.show(e.clientX, e.clientY)
+}
+
+// 处理菜单项选择
+const handleMenuSelect = (id: string) => {
+  console.log('菜单选择:', id)
+  // TODO: 实现具体的菜单操作
+  switch (id) {
+    case 'add-node':
+      console.log('添加节点功能待实现')
+      break
+    case 'add-way':
+      console.log('添加路径功能待实现')
+      break
+    case 'properties':
+      console.log('属性面板功能待实现')
+      break
+  }
+}
 
 const handleZoomIn = () => {
   const cam = mapRef.value?.camera
@@ -81,10 +149,16 @@ const handleDataLoaded = (bounds: DataBounds | null) => {
     <div class="app-main">
       <Splitpanes class="default-theme">
         <Pane :size="20" :min-size="15" :max-size="35">
-          <Sidebar @data-loaded="handleDataLoaded" />
+          <Sidebar
+            :selected-feature="selectedFeatureDetails"
+            @data-loaded="handleDataLoaded"
+            @clear-selection="handleClearSelection"
+          />
         </Pane>
         <Pane :size="80">
-          <MapCanvas ref="mapRef" />
+          <div class="map-wrapper" @contextmenu="handleMapContextMenu">
+            <MapCanvas ref="mapRef" />
+          </div>
         </Pane>
       </Splitpanes>
     </div>
@@ -94,6 +168,13 @@ const handleDataLoaded = (bounds: DataBounds | null) => {
       <span class="statusbar-spacer" />
       <span>MOSM Editor</span>
     </div>
+
+    <!-- 自定义右键菜单 -->
+    <ContextMenu
+      ref="contextMenuRef"
+      :items="mapContextMenuItems"
+      @select="handleMenuSelect"
+    />
   </div>
 </template>
 
@@ -151,6 +232,36 @@ const handleDataLoaded = (bounds: DataBounds | null) => {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+/* ============================================================================
+   原生化改造 - 消除"网页感"
+   ============================================================================ */
+
+/* 全局禁用文本选中 */
+* {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 允许输入框内选中文字 */
+input,
+textarea,
+[contenteditable='true'] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 禁用图片拖拽 */
+img {
+  -webkit-user-drag: none;
+  pointer-events: none;
+}
+
+/* 禁用 Canvas 的图片保存提示 */
+canvas {
+  -webkit-touch-callout: none;
 }
 
 html,
@@ -242,6 +353,11 @@ body,
   border-top: 1px solid var(--color-border);
   font-size: 11px;
   color: var(--color-text-muted);
+}
+
+.map-wrapper {
+  width: 100%;
+  height: 100%;
 }
 
 .statusbar-spacer {

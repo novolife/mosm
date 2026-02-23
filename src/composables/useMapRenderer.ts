@@ -6,11 +6,18 @@
  */
 
 import { ref, shallowRef, onMounted, onUnmounted, watch } from 'vue'
-import { MapRenderer, type CameraState, type RenderStats } from '../core/map-renderer'
+import {
+  MapRenderer,
+  type CameraState,
+  type RenderStats,
+  type SelectedFeature,
+} from '../core/map-renderer'
 import {
   queryViewportFull,
   decodeViewportResponseV2,
+  pickFeature,
   type Viewport,
+  type PickedFeature,
 } from '../core/ipc-bridge'
 
 export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
@@ -29,6 +36,10 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
   const isLoading = ref(false)
   const viewport = shallowRef<Viewport | null>(null)
 
+  // 选中状态
+  const selectedFeature = ref<SelectedFeature | null>(null)
+  const isPicking = ref(false)
+
   let statsInterval: ReturnType<typeof setInterval> | null = null
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -45,6 +56,21 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
       debouncedFetchData()
     })
 
+    // 设置要素点击回调
+    renderer.value.setOnFeatureClick(async (mercX, mercY, toleranceMeters, zoom) => {
+      if (isPicking.value) return
+
+      isPicking.value = true
+      try {
+        const result = await pickFeature(mercX, mercY, toleranceMeters, zoom)
+        handlePickResult(result)
+      } catch (error) {
+        console.error('拾取要素失败:', error)
+      } finally {
+        isPicking.value = false
+      }
+    })
+
     statsInterval = setInterval(() => {
       if (renderer.value) {
         stats.value = renderer.value.getStats()
@@ -55,6 +81,27 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
         camera.value.zoom = currentCamera.zoom
       }
     }, 200)
+  }
+
+  const handlePickResult = (result: PickedFeature) => {
+    if (result.type === 'None') {
+      selectedFeature.value = null
+      renderer.value?.clearSelection()
+      console.log('未选中任何要素')
+    } else {
+      const feature: SelectedFeature = {
+        type: result.type === 'Node' ? 'node' : 'way',
+        id: result.id!,
+      }
+      selectedFeature.value = feature
+      renderer.value?.setSelectedFeature(feature)
+      console.log(`选中 ${feature.type}: ${feature.id}`)
+    }
+  }
+
+  const clearSelection = () => {
+    selectedFeature.value = null
+    renderer.value?.clearSelection()
   }
 
   const fetchData = async () => {
@@ -129,8 +176,11 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
     stats,
     isLoading,
     viewport,
+    selectedFeature,
+    isPicking,
     setCamera,
     fetchData,
     resize,
+    clearSelection,
   }
 }

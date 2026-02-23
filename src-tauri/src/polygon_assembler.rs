@@ -18,6 +18,8 @@ use std::collections::HashMap;
 /// 组装好的多边形
 #[derive(Debug, Clone)]
 pub struct AssembledPolygon {
+    /// Way ID（用于选中高亮）
+    pub way_id: i64,
     /// 渲染特征
     pub render_feature: u16,
     /// 图层值
@@ -57,6 +59,7 @@ pub fn assemble_from_closed_way(
     }
 
     Some(AssembledPolygon {
+        way_id,
         render_feature: way.render_feature,
         layer: way.layer,
         rings: vec![coords],
@@ -117,6 +120,7 @@ pub fn assemble_from_relation(
     rings.extend(inner_rings);
 
     Some(AssembledPolygon {
+        way_id: relation_id, // 对于 Relation，使用 relation_id 作为标识
         render_feature: parsed.feature,
         layer: parsed.layer,
         rings,

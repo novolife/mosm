@@ -3,16 +3,23 @@
  * 侧边栏组件
  *
  * 显示数据统计、工具列表等。
+ * 当有选中要素时，显示要素详情面板。
  */
 
 import { useOsmStore } from '../composables/useOsmStore'
 import { open } from '@tauri-apps/plugin-dialog'
 import { onMounted } from 'vue'
+import FeaturePanel from './FeaturePanel.vue'
 
-import type { DataBounds } from '../core/ipc-bridge'
+import type { DataBounds, FeatureDetails } from '../core/ipc-bridge'
+
+const { selectedFeature } = defineProps<{
+  selectedFeature: FeatureDetails | null
+}>()
 
 const emit = defineEmits<{
   (e: 'data-loaded', bounds: DataBounds | null): void
+  (e: 'clear-selection'): void
 }>()
 
 const { stats, isLoading, loadProgress, error, refreshStats, openPbfFile } = useOsmStore()
@@ -35,6 +42,10 @@ const handleOpenFile = async () => {
   }
 }
 
+const handleCloseFeaturePanel = () => {
+  emit('clear-selection')
+}
+
 onMounted(() => {
   refreshStats()
 })
@@ -42,53 +53,61 @@ onMounted(() => {
 
 <template>
   <aside class="sidebar">
-    <div class="sidebar-header">
-      <h2>MOSM</h2>
-      <span class="version">v0.1.0</span>
-    </div>
+    <!-- 选中要素时显示要素详情面板 -->
+    <template v-if="selectedFeature && selectedFeature.type !== 'NotFound'">
+      <FeaturePanel :feature="selectedFeature" @close="handleCloseFeaturePanel" />
+    </template>
 
-    <section class="sidebar-section">
-      <h3>文件</h3>
-      <button class="btn btn-primary" :disabled="isLoading" @click="handleOpenFile">
-        {{ isLoading ? '加载中...' : '打开 PBF 文件' }}
-      </button>
-    </section>
-
-    <section class="sidebar-section">
-      <h3>数据统计</h3>
-      <div class="stats-grid">
-        <div class="stat-item">
-          <span class="stat-label">节点</span>
-          <span class="stat-value">{{ stats.node_count.toLocaleString() }}</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">路径</span>
-          <span class="stat-value">{{ stats.way_count.toLocaleString() }}</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">关系</span>
-          <span class="stat-value">{{ stats.relation_count.toLocaleString() }}</span>
-        </div>
+    <!-- 未选中要素时显示默认界面 -->
+    <template v-else>
+      <div class="sidebar-header">
+        <h2>MOSM</h2>
+        <span class="version">v0.1.0</span>
       </div>
-    </section>
 
-    <section v-if="loadProgress" class="sidebar-section">
-      <h3>加载详情</h3>
-      <div class="progress-info">
-        <p>节点: {{ loadProgress.nodes_parsed.toLocaleString() }}</p>
-        <p>路径: {{ loadProgress.ways_parsed.toLocaleString() }}</p>
-        <p>关系: {{ loadProgress.relations_parsed.toLocaleString() }}</p>
+      <section class="sidebar-section">
+        <h3>文件</h3>
+        <button class="btn btn-primary" :disabled="isLoading" @click="handleOpenFile">
+          {{ isLoading ? '加载中...' : '打开 PBF 文件' }}
+        </button>
+      </section>
+
+      <section class="sidebar-section">
+        <h3>数据统计</h3>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-label">节点</span>
+            <span class="stat-value">{{ stats.node_count.toLocaleString() }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">路径</span>
+            <span class="stat-value">{{ stats.way_count.toLocaleString() }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">关系</span>
+            <span class="stat-value">{{ stats.relation_count.toLocaleString() }}</span>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="loadProgress" class="sidebar-section">
+        <h3>加载详情</h3>
+        <div class="progress-info">
+          <p>节点: {{ loadProgress.nodes_parsed.toLocaleString() }}</p>
+          <p>路径: {{ loadProgress.ways_parsed.toLocaleString() }}</p>
+          <p>关系: {{ loadProgress.relations_parsed.toLocaleString() }}</p>
+        </div>
+      </section>
+
+      <section v-if="error" class="sidebar-section error-section">
+        <h3>错误</h3>
+        <p class="error-message">{{ error }}</p>
+      </section>
+
+      <div class="sidebar-footer">
+        <span>Modern OSM Editor</span>
       </div>
-    </section>
-
-    <section v-if="error" class="sidebar-section error-section">
-      <h3>错误</h3>
-      <p class="error-message">{{ error }}</p>
-    </section>
-
-    <div class="sidebar-footer">
-      <span>Modern OSM Editor</span>
-    </div>
+    </template>
   </aside>
 </template>
 

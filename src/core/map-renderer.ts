@@ -28,6 +28,12 @@ export interface RenderStats {
   renderTime: number
 }
 
+/** 选中的要素 */
+export interface SelectedFeature {
+  type: 'node' | 'way'
+  id: number
+}
+
 /** 样式配置 */
 export interface RenderStyle {
   nodeColor: string
@@ -119,6 +125,12 @@ export class MapRenderer {
 
   // 相机变化回调
   private onCameraChange: (() => void) | null = null
+
+  // 选中状态
+  private selectedFeature: SelectedFeature | null = null
+  private onFeatureClick:
+    | ((mercX: number, mercY: number, toleranceMeters: number, zoom: number) => void)
+    | null = null
 
   constructor(options: RendererOptions) {
     this.canvas = options.canvas
@@ -252,6 +264,30 @@ export class MapRenderer {
     }
   }
 
+  /** 设置要素点击回调 */
+  setOnFeatureClick(
+    callback: ((mercX: number, mercY: number, toleranceMeters: number, zoom: number) => void) | null,
+  ): void {
+    this.onFeatureClick = callback
+  }
+
+  /** 获取当前选中的要素 */
+  getSelectedFeature(): SelectedFeature | null {
+    return this.selectedFeature
+  }
+
+  /** 设置选中的要素 */
+  setSelectedFeature(feature: SelectedFeature | null): void {
+    this.selectedFeature = feature
+    this.requestRender()
+  }
+
+  /** 清除选中状态 */
+  clearSelection(): void {
+    this.selectedFeature = null
+    this.requestRender()
+  }
+
   /** 设置样式 */
   setStyle(style: Partial<RenderStyle>): void {
     Object.assign(this.style, style)
@@ -380,6 +416,36 @@ export class MapRenderer {
   }
 
   /**
+   * 屏幕坐标 -> 墨卡托坐标 (逆变换)
+   *
+   * 用于点击拾取：将鼠标点击位置转换为地理坐标
+   *
+   * @param screenX 屏幕 X 坐标（相对于 Canvas 左上角）
+   * @param screenY 屏幕 Y 坐标（相对于 Canvas 左上角）
+   */
+  screenToMercator(screenX: number, screenY: number): { mercX: number; mercY: number } {
+    const metersPerPixel = getMetersPerPixel(this.camera.zoom)
+
+    // 转换为相对于画布中心的坐标
+    const relX = screenX - this.width / 2
+    const relY = screenY - this.height / 2
+
+    // 逆变换：屏幕坐标 -> 墨卡托坐标
+    const mercX = this.centerMercatorX + relX * metersPerPixel
+    const mercY = this.centerMercatorY - relY * metersPerPixel // Y 轴翻转
+
+    return { mercX, mercY }
+  }
+
+  /**
+   * 获取当前缩放级别下，指定像素数对应的米数
+   * 用于计算拾取容差
+   */
+  getToleranceInMeters(pixelTolerance: number): number {
+    return pixelTolerance * getMetersPerPixel(this.camera.zoom)
+  }
+
+  /**
    * 渲染多边形 (Area + Multipolygon)
    *
    * 使用 clip + 双倍线宽魔法实现完美的内向描边效果：
@@ -388,7 +454,7 @@ export class MapRenderer {
    *
    * 二进制格式:
    * [polygon_count: u32]
-   * [render_feature: u16][ring_count: u16]
+   * [way_id: i64][render_feature: u16][ring_count: u16]
    * [point_count_ring1: u32][x,y coords...]
    * [point_count_ring2: u32][x,y coords...]...
    */
@@ -399,11 +465,25 @@ export class MapRenderer {
     const view = new DataView(this.polygonBuffer)
     const zoomFactor = Math.min(1, this.camera.zoom / 14)
 
+    // 收集所有 Polygon 数据用于后续高亮
+    interface PolygonData {
+      wayId: number
+      renderFeature: number
+      rings: Array<Array<{ x: number; y: number }>>
+    }
+    const polygons: PolygonData[] = []
+
     let offset = 0
     const polygonCount = view.getUint32(offset, true)
     offset += 4
 
     for (let p = 0; p < polygonCount; p++) {
+      // 读取 Way ID (8 字节)
+      const wayIdLow = view.getUint32(offset, true)
+      const wayIdHigh = view.getInt32(offset + 4, true)
+      const wayId = wayIdLow + wayIdHigh * 0x100000000
+      offset += 8
+
       // 读取 RenderFeature (2 字节)
       const renderFeature = view.getUint16(offset, true)
       offset += 2
@@ -434,6 +514,9 @@ export class MapRenderer {
         }
         rings.push(ring)
       }
+
+      // 保存 Polygon 数据
+      polygons.push({ wayId, renderFeature, rings })
 
       // === Clip 魔法渲染 ===
       ctx.save()
@@ -480,6 +563,41 @@ export class MapRenderer {
       ctx.stroke()
 
       ctx.restore() // 清除裁剪区域
+    }
+
+    // 高亮选中的 Polygon
+    if (this.selectedFeature?.type === 'way') {
+      const selectedPolygon = polygons.find((p) => p.wayId === this.selectedFeature!.id)
+      if (selectedPolygon) {
+        ctx.save()
+
+        // 绘制高亮边框（不使用 clip，直接描边）
+        ctx.beginPath()
+        for (const ring of selectedPolygon.rings) {
+          for (let i = 0; i < ring.length; i++) {
+            if (i === 0) {
+              ctx.moveTo(ring[i].x, ring[i].y)
+            } else {
+              ctx.lineTo(ring[i].x, ring[i].y)
+            }
+          }
+          ctx.closePath()
+        }
+
+        // 外层光晕
+        ctx.strokeStyle = 'rgba(0, 255, 255, 0.5)'
+        ctx.lineWidth = Math.max(6, 4 * zoomFactor)
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+        ctx.stroke()
+
+        // 内层实线
+        ctx.strokeStyle = '#00ffff'
+        ctx.lineWidth = Math.max(2, 2 * zoomFactor)
+        ctx.stroke()
+
+        ctx.restore()
+      }
     }
   }
 
@@ -530,11 +648,24 @@ export class MapRenderer {
 
     const highPriorityColor = '#f44336' // 红色
     const normalColor = '#ef9a9a' // 浅红色
+    const selectedColor = '#00ffff' // 亮青色（选中高亮）
     const size = Math.max(2, 3 * Math.min(1.5, zoom / 20))
+
+    // 选中节点的屏幕坐标（如果有的话，最后绘制）
+    let selectedNodeScreen: { x: number; y: number } | null = null
 
     for (const node of this.nodes) {
       const { x, y } = this.mercatorToScreen(node.x, node.y)
       const isHighPriority = node.refCount >= 2
+
+      // 检查是否为选中节点
+      const isSelected =
+        this.selectedFeature?.type === 'node' && this.selectedFeature.id === node.nodeId
+
+      if (isSelected) {
+        selectedNodeScreen = { x, y }
+        continue // 选中节点最后绘制
+      }
 
       if (isHighPriority) {
         // 优先节点
@@ -569,6 +700,29 @@ export class MapRenderer {
         }
       }
     }
+
+    // 绘制选中的节点（高亮效果）
+    if (selectedNodeScreen) {
+      const { x, y } = selectedNodeScreen
+      const highlightSize = size * 1.5
+
+      // 绘制外圈光晕
+      ctx.beginPath()
+      ctx.arc(x, y, highlightSize + 4, 0, Math.PI * 2)
+      ctx.fillStyle = 'rgba(0, 255, 255, 0.3)'
+      ctx.fill()
+
+      // 绘制青色圆点
+      ctx.beginPath()
+      ctx.arc(x, y, highlightSize, 0, Math.PI * 2)
+      ctx.fillStyle = selectedColor
+      ctx.fill()
+
+      // 绘制白色边框
+      ctx.strokeStyle = '#ffffff'
+      ctx.lineWidth = 2
+      ctx.stroke()
+    }
   }
 
   /**
@@ -597,6 +751,7 @@ export class MapRenderer {
 
     // 第一遍：收集所有路径数据（避免重复读取 buffer）
     interface WayPath {
+      wayId: number
       feature: number
       style: ResolvedStyle
       points: Array<{ x: number; y: number }>
@@ -604,7 +759,14 @@ export class MapRenderer {
 
     const ways: WayPath[] = []
 
+    // Way 格式: [way_id: i64][render_feature: u16][point_count: u32][x,y coords...]
     for (let w = 0; w < wayCount; w++) {
+      // 读取 Way ID (8 字节)
+      const wayIdLow = view.getUint32(offset, true)
+      const wayIdHigh = view.getInt32(offset + 4, true)
+      const wayId = wayIdLow + wayIdHigh * 0x100000000
+      offset += 8
+
       // 读取 RenderFeature (2 字节)
       const feature = view.getUint16(offset, true)
       offset += 2
@@ -629,7 +791,7 @@ export class MapRenderer {
         points.push(this.mercatorToScreen(mercX, mercY))
       }
 
-      ways.push({ feature, style, points })
+      ways.push({ feature, style, points, wayId })
     }
 
     // 第二遍：先画所有桥梁的边框（casing）
@@ -696,44 +858,117 @@ export class MapRenderer {
       ctx.stroke()
     }
 
-    // 重置虚线状态
+    // 第四遍：高亮选中的 Way（最后绘制，确保在顶层）
+    if (this.selectedFeature?.type === 'way') {
+      const selectedWay = ways.find((w) => w.wayId === this.selectedFeature!.id)
+      if (selectedWay) {
+        // 绘制高亮边框
+        ctx.beginPath()
+        ctx.strokeStyle = '#00ffff' // 亮青色
+        ctx.lineWidth = Math.max(3, (selectedWay.style.width + 4) * zoomFactor)
+        ctx.lineCap = 'round'
+        ctx.lineJoin = 'round'
+        ctx.setLineDash([])
+        ctx.globalAlpha = 0.7
+
+        for (let i = 0; i < selectedWay.points.length; i++) {
+          const { x, y } = selectedWay.points[i]
+          if (i === 0) ctx.moveTo(x, y)
+          else ctx.lineTo(x, y)
+        }
+        ctx.stroke()
+
+        // 绘制内线（保持原始样式）
+        ctx.beginPath()
+        ctx.strokeStyle = selectedWay.style.color
+        ctx.lineWidth = Math.max(1, selectedWay.style.width * zoomFactor)
+        ctx.globalAlpha = 1.0
+
+        for (let i = 0; i < selectedWay.points.length; i++) {
+          const { x, y } = selectedWay.points[i]
+          if (i === 0) ctx.moveTo(x, y)
+          else ctx.lineTo(x, y)
+        }
+        ctx.stroke()
+      }
+    }
+
+    // 重置状态
+    ctx.globalAlpha = 1.0
     ctx.setLineDash([])
   }
 
   private setupEventListeners(): void {
     let isDragging = false
+    let dragMoved = false
     let lastX = 0
     let lastY = 0
 
     this.canvas.addEventListener('mousedown', (e) => {
-      isDragging = true
-      lastX = e.clientX
-      lastY = e.clientY
-      this.canvas.style.cursor = 'grabbing'
+      if (e.button === 0) {
+        // 左键
+        isDragging = true
+        dragMoved = false
+        lastX = e.clientX
+        lastY = e.clientY
+        this.canvas.style.cursor = 'grabbing'
+      }
     })
 
     window.addEventListener('mousemove', (e) => {
       if (!isDragging) return
       const dx = e.clientX - lastX
       const dy = e.clientY - lastY
+
+      // 只有移动超过阈值才算真正拖拽
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+        dragMoved = true
+      }
+
       this.pan(dx, dy)
       lastX = e.clientX
       lastY = e.clientY
     })
 
-    window.addEventListener('mouseup', () => {
-      isDragging = false
-      this.canvas.style.cursor = 'grab'
+    window.addEventListener('mouseup', (e) => {
+      if (e.button === 0) {
+        isDragging = false
+        this.canvas.style.cursor = 'grab'
+      }
     })
 
-    this.canvas.addEventListener('wheel', (e) => {
-      e.preventDefault()
+    // 点击拾取（只在没有拖拽时触发）
+    this.canvas.addEventListener('click', (e) => {
+      if (dragMoved) return // 拖拽后不触发点击
+
       const rect = this.canvas.getBoundingClientRect()
-      const x = e.clientX - rect.left
-      const y = e.clientY - rect.top
-      const delta = -e.deltaY * 0.002
-      this.zoomAt(delta, x, y)
-    }, { passive: false })
+      const screenX = e.clientX - rect.left
+      const screenY = e.clientY - rect.top
+
+      // 转换为墨卡托坐标
+      const { mercX, mercY } = this.screenToMercator(screenX, screenY)
+
+      // 计算拾取容差（屏幕上 8 像素对应的米数）
+      const toleranceMeters = this.getToleranceInMeters(8)
+
+      // 触发回调，传递当前缩放级别用于节点可见性过滤
+      if (this.onFeatureClick) {
+        this.onFeatureClick(mercX, mercY, toleranceMeters, this.camera.zoom)
+      }
+    })
+
+    this.canvas.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault()
+        const rect = this.canvas.getBoundingClientRect()
+        const x = e.clientX - rect.left
+        const y = e.clientY - rect.top
+        const delta = -e.deltaY * 0.002
+        this.zoomAt(delta, x, y)
+      },
+      { passive: false },
+    )
 
     this.canvas.style.cursor = 'grab'
   }

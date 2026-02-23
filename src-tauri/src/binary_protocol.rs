@@ -3,22 +3,23 @@
 //! 将 Rust 数据结构高效序列化为字节流，供前端直接通过 ArrayBuffer 消费。
 //! 设计原则：零拷贝、固定长度、可直接映射为 TypedArray。
 //!
-//! ## 节点序列化格式 (V3: 带优先级)
+//! ## 节点序列化格式 (V4: 带 ID + 优先级)
 //!
 //! ```text
-//! [x: f64][y: f64][ref_count: u16][_pad: u16] = 20 bytes per node
+//! [node_id: i64][x: f64][y: f64][ref_count: u16][_pad: u16][_pad2: u32] = 32 bytes per node
 //! ```
 //!
-//! ## Way 几何序列化格式 (V2: 带 RenderFeature + Z-Order)
+//! ## Way 几何序列化格式 (V3: 带 ID + RenderFeature + Z-Order)
 //!
 //! 专为前端 Canvas 渲染设计，**后端完成几何组装和 Z-Order 排序**。
 //!
 //! ```text
 //! [total_ways: u32]
-//! [render_feature: u16][point_count: u32][x1: f64][y1: f64]...
+//! [way_id: i64][render_feature: u16][point_count: u32][x1: f64][y1: f64]...
 //! ...
 //! ```
 //!
+//! - `way_id`: 用于空间拾取后的高亮渲染
 //! - `render_feature`: 低 8 位 = BaseType, 高 8 位 = Flags
 //! - Ways 按 z_order 升序排列，确保正确的图层遮挡
 //!
@@ -62,17 +63,18 @@ impl From<&OsmNode> for NodeBinary {
     }
 }
 
-/// 带优先级的节点二进制表示 (24 字节，内存对齐)
-/// 格式: [x: f64][y: f64][ref_count: u16][_pad: u16][_pad2: u32]
+/// 带优先级的节点二进制表示 (32 字节，内存对齐)
+/// 格式: [node_id: i64][x: f64][y: f64][ref_count: u16][_pad: u16][_pad2: u32]
 /// 注意：x, y 是 Web 墨卡托投影坐标（单位：米）
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct NodePriorityBinary {
+    pub node_id: i64,   // 8 bytes
     pub x: f64,         // 8 bytes - 墨卡托 X (米)
     pub y: f64,         // 8 bytes - 墨卡托 Y (米)
     pub ref_count: u16, // 2 bytes
     pub _pad: u16,      // 2 bytes padding
-    pub _pad2: u32,     // 4 bytes padding (total = 24)
+    pub _pad2: u32,     // 4 bytes padding (total = 32)
 }
 
 impl From<&NodeWithPriority> for NodePriorityBinary {
@@ -80,6 +82,7 @@ impl From<&NodeWithPriority> for NodePriorityBinary {
         // 应用 Web 墨卡托投影
         let (x, y) = lonlat_to_mercator(node.lon, node.lat);
         Self {
+            node_id: node.id,
             x,
             y,
             ref_count: node.ref_count,
@@ -117,12 +120,13 @@ pub fn encode_coordinates(nodes: &[OsmNode]) -> Vec<u8> {
 /// **应用 Web 墨卡托投影**，**按 Z-Order 升序排序**，然后拍平为连续字节流。
 /// 缺失的 Node 会被跳过（PBF 截断场景）。
 ///
-/// 格式: [total_ways: u32][render_feature: u16][point_count: u32][x,y coords...]...
+/// 格式: [total_ways: u32][way_id: i64][render_feature: u16][point_count: u32][x,y coords...]...
 ///
 /// Z-Order 排序确保：隧道 < 水系 < 普通道路 < 桥梁
 pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
     // 第一步：收集所有有效的 Way 数据
     struct WayData {
+        way_id: i64,
         render_feature: u16,
         z_order: i16,
         coords: Vec<(f64, f64)>,
@@ -153,6 +157,7 @@ pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
         let z_order = calculate_z_order(way.render_feature, way.layer);
 
         ways_data.push(WayData {
+            way_id,
             render_feature: way.render_feature,
             z_order,
             coords,
@@ -169,6 +174,9 @@ pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
     buffer.extend_from_slice(&(ways_data.len() as u32).to_le_bytes());
 
     for way_data in ways_data {
+        // 写入 Way ID (8 字节)
+        buffer.extend_from_slice(&way_data.way_id.to_le_bytes());
+
         // 写入 RenderFeature (2 字节)
         buffer.extend_from_slice(&way_data.render_feature.to_le_bytes());
 
@@ -188,7 +196,7 @@ pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
 /// Polygon 几何序列化（用于 Area 和 Multipolygon）
 ///
 /// 格式: [polygon_count: u32]
-///       [render_feature: u16][ring_count: u16]
+///       [way_id: i64][render_feature: u16][ring_count: u16]
 ///       [point_count_ring1: u32][x,y coords...]
 ///       [point_count_ring2: u32][x,y coords...]...
 ///
@@ -203,7 +211,7 @@ pub fn encode_polygons_geometry(polygons: &[AssembledPolygon]) -> Vec<u8> {
         + sorted
             .iter()
             .map(|p| {
-                4 + p.rings.iter().map(|r| 4 + r.len() * 16).sum::<usize>()
+                12 + p.rings.iter().map(|r| 4 + r.len() * 16).sum::<usize>() // 8 (way_id) + 2 (feature) + 2 (ring_count)
             })
             .sum::<usize>();
 
@@ -213,6 +221,9 @@ pub fn encode_polygons_geometry(polygons: &[AssembledPolygon]) -> Vec<u8> {
     buffer.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
 
     for polygon in sorted {
+        // 写入 Way ID (8 字节)
+        buffer.extend_from_slice(&polygon.way_id.to_le_bytes());
+
         // 写入 RenderFeature (2 字节)
         buffer.extend_from_slice(&polygon.render_feature.to_le_bytes());
 
@@ -250,7 +261,7 @@ pub struct ViewportResponseHeader {
 /// 格式:
 /// ```text
 /// [Header: 16 bytes]
-/// [Nodes: node_count * 24 bytes]
+/// [Nodes: node_count * 32 bytes]
 /// [Way geometry: variable length]
 /// [Polygon geometry: variable length]
 /// ```

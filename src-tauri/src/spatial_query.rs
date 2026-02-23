@@ -268,3 +268,188 @@ pub fn tiles_in_viewport(viewport: &Viewport) -> Vec<TileCoord> {
     }
     tiles
 }
+
+// ============================================================================
+// 空间拾取 (Feature Picking / Hit Test)
+// ============================================================================
+
+use crate::projection::mercator_to_lonlat;
+
+/// 拾取结果类型
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", content = "id")]
+pub enum PickedFeature {
+    Node(i64),
+    Way(i64),
+    None,
+}
+
+/// 点到线段的最短距离（平方）
+fn point_to_segment_distance_sq(
+    px: f64,
+    py: f64,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+) -> f64 {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len_sq = dx * dx + dy * dy;
+
+    if len_sq < 1e-10 {
+        // 线段退化为点
+        let dx = px - x1;
+        let dy = py - y1;
+        return dx * dx + dy * dy;
+    }
+
+    // 计算投影点参数 t
+    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    // 投影点坐标
+    let proj_x = x1 + t * dx;
+    let proj_y = y1 + t * dy;
+
+    let dx = px - proj_x;
+    let dy = py - proj_y;
+    dx * dx + dy * dy
+}
+
+/// 在点击位置查找最近的要素
+///
+/// 算法：
+/// 1. 首先查找容差范围内的 Node（优先级最高，根据 zoom 过滤）
+/// 2. 如果没有 Node，查找最近的 Way
+///
+/// 参数：
+/// - merc_x, merc_y: 点击位置的墨卡托坐标（米）
+/// - tolerance_meters: 拾取容差（米）
+/// - zoom: 当前缩放级别，用于过滤节点显示
+///
+/// 节点可见性规则（与渲染一致）：
+/// - 优先节点 (ref_count >= 2): zoom >= 18 时显示
+/// - 普通节点 (ref_count < 2): zoom >= 20 时显示
+pub fn pick_feature(
+    store: &OsmStore,
+    merc_x: f64,
+    merc_y: f64,
+    tolerance_meters: f64,
+    zoom: f64,
+) -> PickedFeature {
+    use crate::projection::lonlat_to_mercator;
+    use rstar::AABB;
+
+    // 转换为经纬度用于 R-Tree 查询
+    let (click_lon, click_lat) = mercator_to_lonlat(merc_x, merc_y);
+
+    // 计算容差对应的经纬度范围（近似）
+    // 在赤道，1度 ≈ 111320米
+    let meters_per_degree = 111320.0;
+    let tolerance_deg = tolerance_meters / meters_per_degree;
+
+    let tolerance_sq = tolerance_meters * tolerance_meters;
+
+    // 1. 优先查找 Node
+    let search_bbox = AABB::from_corners(
+        [click_lon - tolerance_deg, click_lat - tolerance_deg],
+        [click_lon + tolerance_deg, click_lat + tolerance_deg],
+    );
+
+    let node_index = store.node_index();
+    let mut closest_node: Option<(i64, f64)> = None;
+
+    for entry in node_index.locate_in_envelope(&search_bbox) {
+        if let Some(node) = store.nodes.get(&entry.id) {
+            // 根据 zoom 级别过滤节点（与渲染逻辑一致）
+            let ref_count = store
+                .node_ref_count
+                .get(&entry.id)
+                .map(|r| *r)
+                .unwrap_or(0);
+            let is_high_priority = ref_count >= 2;
+
+            // 优先节点: zoom >= 18 时可见
+            // 普通节点: zoom >= 20 时可见
+            let is_visible = if is_high_priority {
+                zoom >= 18.0
+            } else {
+                zoom >= 20.0
+            };
+
+            if !is_visible {
+                continue;
+            }
+
+            let (node_mx, node_my) = lonlat_to_mercator(node.lon, node.lat);
+            let dx = node_mx - merc_x;
+            let dy = node_my - merc_y;
+            let dist_sq = dx * dx + dy * dy;
+
+            if dist_sq <= tolerance_sq {
+                if closest_node.is_none() || dist_sq < closest_node.unwrap().1 {
+                    closest_node = Some((entry.id, dist_sq));
+                }
+            }
+        }
+    }
+
+    if let Some((node_id, _)) = closest_node {
+        return PickedFeature::Node(node_id);
+    }
+
+    // 2. 查找 Way
+    // Way 的 R-Tree 存储的是 Way 的包围盒
+    // 使用一个非常小的查询框来查找"包含点击点"的所有 Way 包围盒
+    let way_index = store.way_index();
+    let mut closest_way: Option<(i64, f64)> = None;
+
+    // 使用一个极小的搜索框来查找包含该点的所有 Way
+    let tiny_eps = 1e-9;
+    let click_box = AABB::from_corners(
+        [click_lon - tiny_eps, click_lat - tiny_eps],
+        [click_lon + tiny_eps, click_lat + tiny_eps],
+    );
+
+    for entry in way_index.locate_in_envelope_intersecting(&click_box) {
+        if let Some(way) = store.ways.get(&entry.id) {
+
+            // 计算点击位置到 Way 的最短距离
+            let node_refs = &way.node_refs;
+            if node_refs.len() < 2 {
+                continue;
+            }
+
+            let mut min_dist_sq = f64::MAX;
+
+            for i in 0..node_refs.len() - 1 {
+                let n1 = store.nodes.get(&node_refs[i]);
+                let n2 = store.nodes.get(&node_refs[i + 1]);
+
+                if let (Some(n1), Some(n2)) = (n1, n2) {
+                    let (mx1, my1) = lonlat_to_mercator(n1.lon, n1.lat);
+                    let (mx2, my2) = lonlat_to_mercator(n2.lon, n2.lat);
+
+                    let dist_sq = point_to_segment_distance_sq(merc_x, merc_y, mx1, my1, mx2, my2);
+
+                    if dist_sq < min_dist_sq {
+                        min_dist_sq = dist_sq;
+                    }
+                }
+            }
+
+            if min_dist_sq <= tolerance_sq {
+                if closest_way.is_none() || min_dist_sq < closest_way.unwrap().1 {
+                    closest_way = Some((entry.id, min_dist_sq));
+                }
+            }
+        }
+    }
+
+    if let Some((way_id, _)) = closest_way {
+        return PickedFeature::Way(way_id);
+    }
+
+    PickedFeature::None
+}

@@ -102,14 +102,15 @@ export async function queryViewportFull(viewport: Viewport): Promise<Uint8Array>
 // ============================================================================
 
 /**
- * V3 响应格式:
- * - Header (16 bytes): node_count, way_count, truncated, reserved
- * - Nodes: node_count * 24 bytes (lon: f64, lat: f64, ref_count: u16, padding: 6 bytes)
- * - Way geometry: [total_ways: u32][point_count: u32][coords...]...
+ * V4 响应格式:
+ * - Header (16 bytes): node_count, way_count, polygon_count, truncated
+ * - Nodes: node_count * 32 bytes (node_id: i64, x: f64, y: f64, ref_count: u16, padding: 6 bytes)
+ * - Way geometry: [total_ways: u32][way_id: i64][render_feature: u16][point_count: u32][coords...]...
+ * - Polygon geometry: [total_polygons: u32][render_feature: u16][ring_count: u16][point_count: u32][coords...]...
  */
 
 const HEADER_SIZE = 16
-const NODE_SIZE = 24 // lon(8) + lat(8) + ref_count(2) + pad(2) + pad2(4)
+const NODE_SIZE = 32 // node_id(8) + x(8) + y(8) + ref_count(2) + pad(2) + pad2(4)
 
 /** 解码响应头 */
 export function decodeHeader(buffer: ArrayBuffer): ResponseHeader {
@@ -122,8 +123,9 @@ export function decodeHeader(buffer: ArrayBuffer): ResponseHeader {
   }
 }
 
-/** 节点数据 (带优先级, 墨卡托坐标) */
+/** 节点数据 (带 ID 和优先级, 墨卡托坐标) */
 export interface NodeData {
+  nodeId: number // 节点 ID（用于拾取后高亮）
   x: number      // 墨卡托 X 坐标（米）
   y: number      // 墨卡托 Y 坐标（米）
   refCount: number
@@ -153,11 +155,17 @@ export function decodeViewportResponseV2(buffer: ArrayBuffer): ViewportData {
   const nodes: NodeData[] = []
   let offset = HEADER_SIZE
 
+  // Node 格式: [node_id: i64][x: f64][y: f64][ref_count: u16][padding: 6 bytes]
   for (let i = 0; i < header.nodeCount; i++) {
+    const nodeIdLow = view.getUint32(offset, true)
+    const nodeIdHigh = view.getInt32(offset + 4, true)
+    const nodeId = nodeIdLow + nodeIdHigh * 0x100000000
+
     nodes.push({
-      x: view.getFloat64(offset, true), // 墨卡托 X
-      y: view.getFloat64(offset + 8, true), // 墨卡托 Y
-      refCount: view.getUint16(offset + 16, true),
+      nodeId,
+      x: view.getFloat64(offset + 8, true), // 墨卡托 X
+      y: view.getFloat64(offset + 16, true), // 墨卡托 Y
+      refCount: view.getUint16(offset + 24, true),
     })
     offset += NODE_SIZE
   }
@@ -168,7 +176,9 @@ export function decodeViewportResponseV2(buffer: ArrayBuffer): ViewportData {
   offset += 4
 
   // 跳过所有 Way 数据找到 Polygon 数据起始位置
+  // Way 格式: [way_id: i64][render_feature: u16][point_count: u32][x,y coords...]
   for (let w = 0; w < wayCount; w++) {
+    offset += 8 // way_id (i64)
     offset += 2 // render_feature (u16)
     const pointCount = view.getUint32(offset, true)
     offset += 4
@@ -205,7 +215,7 @@ export function projectCoordinates(
   coords: Float64Array,
   zoom: number,
   centerX: number,
-  centerY: number
+  centerY: number,
 ): Float32Array {
   const count = coords.length / 2
   const projected = new Float32Array(count * 2)
@@ -222,4 +232,88 @@ export function projectCoordinates(
   }
 
   return projected
+}
+
+// ============================================================================
+// 空间拾取 (Feature Picking)
+// ============================================================================
+
+/** 拾取结果类型 */
+export interface PickedFeature {
+  type: 'Node' | 'Way' | 'None'
+  id?: number
+}
+
+/**
+ * 在指定墨卡托坐标位置拾取最近的要素
+ *
+ * @param mercX 墨卡托 X 坐标（米）
+ * @param mercY 墨卡托 Y 坐标（米）
+ * @param toleranceMeters 拾取容差（米）
+ * @param zoom 当前缩放级别，用于过滤不可见的节点
+ */
+export async function pickFeature(
+  mercX: number,
+  mercY: number,
+  toleranceMeters: number,
+  zoom: number,
+): Promise<PickedFeature> {
+  return await invoke<PickedFeature>('pick_feature', {
+    mercX,
+    mercY,
+    toleranceMeters,
+    zoom,
+  })
+}
+
+// ============================================================================
+// 要素详情 (Feature Details)
+// ============================================================================
+
+/** 所属关系信息 */
+export interface ParentRelation {
+  id: number
+  role: string
+  relation_type: string | null
+  name: string | null
+}
+
+/** 节点详情 */
+export interface NodeDetails {
+  type: 'Node'
+  id: number
+  lon: number
+  lat: number
+  tags: [string, string][]
+  ref_count: number
+  parent_relations: ParentRelation[]
+}
+
+/** 路径详情 */
+export interface WayDetails {
+  type: 'Way'
+  id: number
+  tags: [string, string][]
+  node_count: number
+  is_area: boolean
+  render_feature: number
+  layer: number
+  parent_relations: ParentRelation[]
+}
+
+/** 未找到 */
+export interface NotFound {
+  type: 'NotFound'
+}
+
+export type FeatureDetails = NodeDetails | WayDetails | NotFound
+
+/** 获取节点详情 */
+export async function getNodeDetails(nodeId: number): Promise<FeatureDetails> {
+  return await invoke<FeatureDetails>('get_node_details', { nodeId })
+}
+
+/** 获取路径详情 */
+export async function getWayDetails(wayId: number): Promise<FeatureDetails> {
+  return await invoke<FeatureDetails>('get_way_details', { wayId })
 }

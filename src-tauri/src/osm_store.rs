@@ -260,6 +260,16 @@ impl OsmStore {
             center_lat: (min_lat + max_lat) / 2.0,
         })
     }
+
+    /// 获取节点索引的只读访问
+    pub fn node_index(&self) -> std::sync::RwLockReadGuard<'_, RTree<SpatialEntry>> {
+        self.node_index.read().unwrap()
+    }
+
+    /// 获取路径索引的只读访问
+    pub fn way_index(&self) -> std::sync::RwLockReadGuard<'_, RTree<SpatialEntry>> {
+        self.way_index.read().unwrap()
+    }
 }
 
 impl Default for OsmStore {
