@@ -40,9 +40,10 @@
 - [x] 影响渲染的标签修改触发重绘
 
 **撤销/重做（Undo/Redo）**
-- [ ] Command Pattern 架构
-- [ ] HistoryStack 实现
-- [ ] 所有修改操作命令化
+- [x] Command Pattern 架构
+- [x] HistoryStack 实现
+- [x] 标签编辑命令化（UpdateWayTagsCommand, UpdateNodeTagsCommand）
+- [x] Ctrl+Z / Ctrl+Shift+Z 快捷键支持
 
 **几何编辑（Spatial CRUD）**
 - [ ] 节点拖拽移动

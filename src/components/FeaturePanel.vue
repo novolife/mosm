@@ -1,7 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+/**
+ * 要素详情面板
+ *
+ * 显示选中要素的元数据和标签编辑器
+ */
+import { computed } from 'vue'
 import type { FeatureDetails } from '../core/ipc-bridge'
-import { updateWayTags, updateNodeTags } from '../core/ipc-bridge'
+import TagEditor from './TagEditor.vue'
 
 const props = defineProps<{
   feature: FeatureDetails | null
@@ -11,34 +16,6 @@ const emit = defineEmits<{
   close: []
   tagsUpdated: [renderFeatureChanged: boolean]
 }>()
-
-// 保存状态
-const isSaving = ref(false)
-
-// 可编辑的标签副本
-const editableTags = ref<{ key: string; value: string }[]>([])
-
-// 记录原始渲染特征，用于判断是否需要重绘
-let originalRenderFeature = 0
-
-// 同步原始标签到可编辑副本
-watch(
-  () => props.feature,
-  (newFeature) => {
-    if (newFeature && newFeature.type !== 'NotFound') {
-      editableTags.value = (newFeature.tags || []).map(([key, value]) => ({
-        key,
-        value,
-      }))
-      if (newFeature.type === 'Way') {
-        originalRenderFeature = newFeature.render_feature
-      }
-    } else {
-      editableTags.value = []
-    }
-  },
-  { immediate: true },
-)
 
 const featureType = computed(() => {
   if (!props.feature || props.feature.type === 'NotFound') return null
@@ -73,9 +50,16 @@ const parentRelations = computed(() => {
   return props.feature.parent_relations || []
 })
 
-// 是否可编辑（Node 和 Way 都支持）
-const canEdit = computed(() => {
-  return props.feature?.type === 'Way' || props.feature?.type === 'Node'
+const featureTags = computed(() => {
+  if (!props.feature || props.feature.type === 'NotFound') return []
+  return props.feature.tags || []
+})
+
+const renderFeature = computed(() => {
+  if (props.feature?.type === 'Way') {
+    return props.feature.render_feature
+  }
+  return 0
 })
 
 function formatRelationType(type: string | null): string {
@@ -95,79 +79,8 @@ function formatRelationType(type: string | null): string {
   return typeMap[type] || type
 }
 
-function addTag() {
-  editableTags.value.push({ key: '', value: '' })
-}
-
-async function removeTag(index: number) {
-  editableTags.value.splice(index, 1)
-  // 删除后立即保存
-  await saveTagsQuietly()
-}
-
-// 静默保存标签（失去焦点或删除时调用）
-async function saveTagsQuietly() {
-  if (!props.feature || props.feature.type === 'NotFound') return
-  if (isSaving.value) return
-
-  // 检查是否有正在编辑的不完整标签（key有值但value为空，或反之）
-  const hasIncompleteTag = editableTags.value.some(
-    (tag) => (tag.key.trim() !== '' && tag.value.trim() === '') ||
-             (tag.key.trim() === '' && tag.value.trim() !== '')
-  )
-
-  // 如果有不完整的标签，跳过保存（用户可能还在编辑）
-  if (hasIncompleteTag) {
-    return
-  }
-
-  // 过滤掉空的标签
-  const validTags = editableTags.value.filter(
-    (tag) => tag.key.trim() !== '' && tag.value.trim() !== '',
-  )
-
-  isSaving.value = true
-
-  try {
-    let result
-    if (props.feature.type === 'Way') {
-      result = await updateWayTags(
-        props.feature.id,
-        validTags.map((tag) => [tag.key.trim(), tag.value.trim()]),
-      )
-
-      if (result.success) {
-        // Way: 判断渲染特征是否改变
-        const renderFeatureChanged = result.render_feature !== originalRenderFeature
-        originalRenderFeature = result.render_feature
-        emit('tagsUpdated', renderFeatureChanged)
-      }
-    } else if (props.feature.type === 'Node') {
-      result = await updateNodeTags(
-        props.feature.id,
-        validTags.map((tag) => [tag.key.trim(), tag.value.trim()]),
-      )
-
-      if (result.success) {
-        // Node: 标签不影响渲染，不需要重绘
-        emit('tagsUpdated', false)
-      }
-    }
-  } catch (error) {
-    console.error('保存标签出错:', error)
-  } finally {
-    isSaving.value = false
-  }
-}
-
-// 输入框失去焦点时保存
-function handleBlur() {
-  saveTagsQuietly()
-}
-
-// 回车键时移出焦点并保存
-function handleKeyEnter(event: KeyboardEvent) {
-  ;(event.target as HTMLInputElement).blur()
+function handleTagsUpdated(renderFeatureChanged: boolean) {
+  emit('tagsUpdated', renderFeatureChanged)
 }
 </script>
 
@@ -222,49 +135,15 @@ function handleKeyEnter(event: KeyboardEvent) {
         </div>
       </div>
 
-      <!-- 标签编辑器（实时编辑） -->
-      <div class="info-section tags-section">
-        <div class="section-header">
-          <span class="section-title">标签 ({{ editableTags.length }})</span>
-          <span v-if="isSaving" class="saving-indicator">保存中...</span>
-        </div>
-
-        <!-- Way 可编辑 -->
-        <div v-if="canEdit" class="tags-editor">
-          <div
-            v-for="(tag, index) in editableTags"
-            :key="index"
-            class="tag-edit-row"
-          >
-            <input
-              v-model="tag.key"
-              type="text"
-              class="tag-input key-input"
-              placeholder="键"
-              @blur="handleBlur"
-              @keydown.enter="handleKeyEnter"
-            />
-            <span class="tag-separator">=</span>
-            <input
-              v-model="tag.value"
-              type="text"
-              class="tag-input value-input"
-              placeholder="值"
-              @blur="handleBlur"
-              @keydown.enter="handleKeyEnter"
-            />
-            <button class="tag-delete-btn" @click="removeTag(index)" title="删除标签">
-              ×
-            </button>
-          </div>
-          <button class="add-tag-btn" @click="addTag">
-            + 添加标签
-          </button>
-        </div>
-
-        <div v-else class="empty-tags">
-          {{ featureType === 'Node' ? '此节点没有标签' : '此路径没有标签' }}
-        </div>
+      <!-- 标签编辑器 -->
+      <div v-if="featureType && featureId" class="info-section tags-section">
+        <TagEditor
+          :tags="featureTags"
+          :feature-type="featureType"
+          :feature-id="featureId"
+          :original-render-feature="renderFeature"
+          @tags-updated="handleTagsUpdated"
+        />
       </div>
 
       <!-- 所属关系 -->
@@ -378,12 +257,6 @@ function handleKeyEnter(event: KeyboardEvent) {
   text-transform: uppercase;
   color: var(--color-text-muted);
   letter-spacing: 0.5px;
-}
-
-.saving-indicator {
-  font-size: 10px;
-  color: var(--color-accent);
-  font-style: italic;
 }
 
 .info-grid {
@@ -520,84 +393,4 @@ function handleKeyEnter(event: KeyboardEvent) {
   border-radius: 2px;
 }
 
-/* 标签编辑器样式 */
-.tags-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tag-edit-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.tag-input {
-  flex: 1;
-  padding: 6px 8px;
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  background: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  font-size: 12px;
-  font-family: var(--font-mono);
-}
-
-.tag-input:focus {
-  outline: none;
-  border-color: var(--color-accent);
-}
-
-.key-input {
-  flex: 0.8;
-}
-
-.value-input {
-  flex: 1.2;
-}
-
-.tag-separator {
-  color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.tag-delete-btn {
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: transparent;
-  color: var(--color-text-muted);
-  font-size: 16px;
-  cursor: pointer;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.tag-delete-btn:hover {
-  background: rgba(244, 67, 54, 0.2);
-  color: #f44336;
-}
-
-.add-tag-btn {
-  margin-top: 4px;
-  padding: 6px 12px;
-  border: 1px dashed var(--color-border);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--color-text-muted);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.add-tag-btn:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-  background: var(--color-accent-subtle);
-}
 </style>

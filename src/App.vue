@@ -15,6 +15,7 @@ import ContextMenu from './components/ContextMenu.vue'
 import type { MenuItem } from './components/ContextMenu.vue'
 import { ref, watch } from 'vue'
 import { getNodeDetails, getWayDetails, type FeatureDetails } from './core/ipc-bridge'
+import { useHistory } from './composables/useHistory'
 
 const mapRef = ref<InstanceType<typeof MapCanvas> | null>(null)
 const contextMenuRef = ref<InstanceType<typeof ContextMenu> | null>(null)
@@ -73,6 +74,30 @@ const handleTagsUpdated = async (renderFeatureChanged: boolean) => {
     mapRef.value?.fetchData()
   }
 }
+
+// ============================================================================
+// Undo/Redo 历史记录
+// ============================================================================
+
+const refreshFeatureDetails = async () => {
+  const feature = mapRef.value?.selectedFeature
+  if (feature) {
+    if (feature.type === 'node') {
+      selectedFeatureDetails.value = await getNodeDetails(feature.id)
+    } else if (feature.type === 'way') {
+      selectedFeatureDetails.value = await getWayDetails(feature.id)
+    }
+  }
+}
+
+useHistory({
+  onUndoRedo: async (needsRedraw) => {
+    await refreshFeatureDetails()
+    if (needsRedraw) {
+      mapRef.value?.fetchData()
+    }
+  },
+})
 
 // 右键菜单项配置
 const mapContextMenuItems: MenuItem[] = [
