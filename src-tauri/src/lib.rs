@@ -6,6 +6,7 @@ mod binary_protocol;
 mod osm_store;
 mod pbf_parser;
 mod projection;
+mod render_feature;
 mod spatial_query;
 
 use osm_store::OsmStore;

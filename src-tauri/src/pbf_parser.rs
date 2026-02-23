@@ -4,6 +4,7 @@
 //! 支持多线程并行解析。
 
 use crate::osm_store::{MemberType, OsmNode, OsmRelation, OsmStore, OsmWay, RelationMember};
+use crate::render_feature::parse_tags;
 use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader, RelMemberType};
 use std::path::Path;
@@ -60,13 +61,17 @@ pub fn parse_pbf_file(path: &Path, store: Arc<OsmStore>) -> Result<ParseProgress
                 nodes_parsed += 1;
             }
             Element::Way(way) => {
+                let tags: Vec<(String, String)> = way
+                    .tags()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                let parsed = parse_tags(&tags);
                 let osm_way = OsmWay {
                     id: way.id(),
                     node_refs: way.refs().collect(),
-                    tags: way
-                        .tags()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect(),
+                    tags,
+                    render_feature: parsed.feature,
+                    layer: parsed.layer,
                 };
                 store.insert_way(osm_way);
                 ways_parsed += 1;
@@ -137,13 +142,17 @@ pub fn parse_pbf_parallel(path: &Path, store: Arc<OsmStore>) -> Result<ParseProg
                         (1, 0, 0)
                     }
                     Element::Way(way) => {
+                        let tags: Vec<(String, String)> = way
+                            .tags()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect();
+                        let parsed = parse_tags(&tags);
                         let osm_way = OsmWay {
                             id: way.id(),
                             node_refs: way.refs().collect(),
-                            tags: way
-                                .tags()
-                                .map(|(k, v)| (k.to_string(), v.to_string()))
-                                .collect(),
+                            tags,
+                            render_feature: parsed.feature,
+                            layer: parsed.layer,
                         };
                         store_ref.insert_way(osm_way);
                         (0, 1, 0)

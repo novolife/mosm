@@ -45,6 +45,8 @@ const DEFAULT_STYLE: RenderStyle = {
   backgroundColor: '#1e1e1e',
 }
 
+import { resolveStyle, type ResolvedStyle } from './render-styles'
+
 const DEG_TO_RAD = Math.PI / 180
 
 /** 地球赤道半周长（米），与 Rust 端一致 */
@@ -417,18 +419,22 @@ export class MapRenderer {
   }
 
   /**
-   * 渲染 Way 几何数据 (零对象分配)
+   * 渲染 Way 几何数据 (Z-Order + 样式修饰符)
+   *
+   * 二进制格式: [wayCount: u32][renderFeature: u16][pointCount: u32][x,y coords...]...
+   *
+   * 渲染顺序：数据已按 z_order 升序排列（隧道 -> 水系 -> 普通道路 -> 桥梁）
+   * 特殊效果：
+   * - 桥梁 (BRIDGE flag): 先画深色边框，再画主色
+   * - 隧道 (TUNNEL flag): 虚线 + 颜色变暗
+   * - 间歇性 (INTERMITTENT flag): 细虚线
    */
   private renderWays(): void {
     if (!this.wayBuffer || this.wayBuffer.byteLength < 4) return
 
     const { ctx } = this
     const view = new DataView(this.wayBuffer)
-
-    ctx.strokeStyle = this.style.wayColor
-    ctx.lineWidth = Math.max(1, this.style.wayWidth * Math.min(1, this.camera.zoom / 14))
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
+    const zoomFactor = Math.min(1, this.camera.zoom / 14)
 
     let offset = 0
     const wayCount = view.getUint32(offset, true)
@@ -436,7 +442,21 @@ export class MapRenderer {
 
     this.stats.wayCount = wayCount
 
+    // 第一遍：收集所有路径数据（避免重复读取 buffer）
+    interface WayPath {
+      feature: number
+      style: ResolvedStyle
+      points: Array<{ x: number; y: number }>
+    }
+
+    const ways: WayPath[] = []
+
     for (let w = 0; w < wayCount; w++) {
+      // 读取 RenderFeature (2 字节)
+      const feature = view.getUint16(offset, true)
+      offset += 2
+
+      // 读取点数量 (4 字节)
       const pointCount = view.getUint32(offset, true)
       offset += 4
 
@@ -445,26 +465,86 @@ export class MapRenderer {
         continue
       }
 
-      ctx.beginPath()
+      const style = resolveStyle(feature)
+      const points: Array<{ x: number; y: number }> = []
 
       for (let p = 0; p < pointCount; p++) {
-        // 数据已经是墨卡托坐标（米）
         const mercX = view.getFloat64(offset, true)
         offset += 8
         const mercY = view.getFloat64(offset, true)
         offset += 8
-
-        const { x, y } = this.mercatorToScreen(mercX, mercY)
-
-        if (p === 0) {
-          ctx.moveTo(x, y)
-        } else {
-          ctx.lineTo(x, y)
-        }
+        points.push(this.mercatorToScreen(mercX, mercY))
       }
 
+      ways.push({ feature, style, points })
+    }
+
+    // 第二遍：先画所有桥梁的边框（casing）
+    for (const way of ways) {
+      if (!way.style.drawCasing) continue
+
+      ctx.beginPath()
+      ctx.strokeStyle = way.style.casingColor || '#37474f'
+      ctx.lineWidth = Math.max(1, (way.style.width + (way.style.casingWidth || 2) * 2) * zoomFactor)
+      ctx.lineCap = way.style.lineCap || 'round'
+      ctx.lineJoin = way.style.lineJoin || 'round'
+      ctx.setLineDash([])
+
+      for (let i = 0; i < way.points.length; i++) {
+        const { x, y } = way.points[i]
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
       ctx.stroke()
     }
+
+    // 第三遍：画主线条（批处理优化）
+    let currentFeature = -1
+    let currentStyle: ResolvedStyle | null = null
+    let batchStarted = false
+
+    for (const way of ways) {
+      // 检查是否需要切换样式
+      if (way.feature !== currentFeature) {
+        // 结束上一批
+        if (batchStarted) {
+          ctx.stroke()
+        }
+
+        // 设置新样式
+        currentStyle = way.style
+        ctx.strokeStyle = currentStyle.color
+        ctx.lineWidth = Math.max(1, currentStyle.width * zoomFactor)
+        ctx.lineCap = currentStyle.lineCap || 'round'
+        ctx.lineJoin = currentStyle.lineJoin || 'round'
+
+        // 设置虚线
+        if (currentStyle.lineDash) {
+          ctx.setLineDash(currentStyle.lineDash.map((d) => d * zoomFactor))
+        } else {
+          ctx.setLineDash([])
+        }
+
+        ctx.beginPath()
+        currentFeature = way.feature
+        batchStarted = true
+      }
+
+      // 绘制路径
+      for (let i = 0; i < way.points.length; i++) {
+        const { x, y } = way.points[i]
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      }
+    }
+
+    // 结束最后一批
+    if (batchStarted) {
+      ctx.stroke()
+    }
+
+    // 重置虚线状态
+    ctx.setLineDash([])
   }
 
   private setupEventListeners(): void {

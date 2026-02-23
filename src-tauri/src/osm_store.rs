@@ -24,6 +24,11 @@ pub struct OsmWay {
     pub id: i64,
     pub node_refs: Vec<i64>,
     pub tags: Vec<(String, String)>,
+    /// 预计算的渲染特征 (u16 位掩码)
+    /// 低 8 位: BaseType, 高 8 位: Flags
+    pub render_feature: u16,
+    /// OSM layer 值 (-5 到 +5)，用于 Z-order 排序
+    pub layer: i8,
 }
 
 /// OSM 关系 (Relation) - 复杂的逻辑组合

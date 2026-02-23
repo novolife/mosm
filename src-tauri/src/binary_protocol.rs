@@ -6,22 +6,25 @@
 //! ## 节点序列化格式 (V3: 带优先级)
 //!
 //! ```text
-//! [lon: f64][lat: f64][ref_count: u16][_pad: u16] = 20 bytes per node
+//! [x: f64][y: f64][ref_count: u16][_pad: u16] = 20 bytes per node
 //! ```
 //!
-//! ## Way 几何序列化格式 (紧凑型)
+//! ## Way 几何序列化格式 (V2: 带 RenderFeature + Z-Order)
 //!
-//! 专为前端 Canvas 渲染设计，**后端完成几何组装**，前端零对象分配。
+//! 专为前端 Canvas 渲染设计，**后端完成几何组装和 Z-Order 排序**。
 //!
 //! ```text
 //! [total_ways: u32]
-//! [way_1_point_count: u32][x1: f64][y1: f64][x2: f64][y2: f64]...
-//! [way_2_point_count: u32][x1: f64][y1: f64]...
+//! [render_feature: u16][point_count: u32][x1: f64][y1: f64]...
 //! ...
 //! ```
+//!
+//! - `render_feature`: 低 8 位 = BaseType, 高 8 位 = Flags
+//! - Ways 按 z_order 升序排列，确保正确的图层遮挡
 
 use crate::osm_store::{OsmNode, OsmStore};
 use crate::projection::lonlat_to_mercator;
+use crate::render_feature::calculate_z_order;
 use crate::spatial_query::NodeWithPriority;
 use bytemuck::{Pod, Zeroable};
 
@@ -93,20 +96,24 @@ pub fn encode_coordinates(nodes: &[OsmNode]) -> Vec<u8> {
     buffer
 }
 
-/// 紧凑型 Way 几何序列化（Web 墨卡托投影）
+/// 紧凑型 Way 几何序列化（Web 墨卡托投影 + Z-Order 排序）
 ///
 /// 后端完成几何组装：查询 Way 的 node_refs，从 DashMap 获取坐标，
-/// **应用 Web 墨卡托投影**，然后拍平为连续字节流。
+/// **应用 Web 墨卡托投影**，**按 Z-Order 升序排序**，然后拍平为连续字节流。
 /// 缺失的 Node 会被跳过（PBF 截断场景）。
 ///
-/// 格式: [total_ways: u32][way_1_point_count: u32][x,y coords in meters...]...
+/// 格式: [total_ways: u32][render_feature: u16][point_count: u32][x,y coords...]...
+///
+/// Z-Order 排序确保：隧道 < 水系 < 普通道路 < 桥梁
 pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
-    let mut buffer = Vec::with_capacity(4 + way_ids.len() * 64);
-    let mut valid_way_count: u32 = 0;
+    // 第一步：收集所有有效的 Way 数据
+    struct WayData {
+        render_feature: u16,
+        z_order: i16,
+        coords: Vec<(f64, f64)>,
+    }
 
-    // 预留 way_count 位置
-    let way_count_pos = buffer.len();
-    buffer.extend_from_slice(&0u32.to_le_bytes());
+    let mut ways_data: Vec<WayData> = Vec::with_capacity(way_ids.len());
 
     for &way_id in way_ids {
         let way = match store.ways.get(&way_id) {
@@ -119,10 +126,7 @@ pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
             .node_refs
             .iter()
             .filter_map(|node_id| {
-                store.nodes.get(node_id).map(|n| {
-                    // 应用 Web 墨卡托投影
-                    lonlat_to_mercator(n.lon, n.lat)
-                })
+                store.nodes.get(node_id).map(|n| lonlat_to_mercator(n.lon, n.lat))
             })
             .collect();
 
@@ -131,21 +135,37 @@ pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
             continue;
         }
 
-        // 写入点数量
-        buffer.extend_from_slice(&(coords.len() as u32).to_le_bytes());
+        let z_order = calculate_z_order(way.render_feature, way.layer);
 
-        // 写入投影后的坐标（单位：米）
-        for (x, y) in coords {
+        ways_data.push(WayData {
+            render_feature: way.render_feature,
+            z_order,
+            coords,
+        });
+    }
+
+    // 第二步：按 Z-Order 升序排序（先渲染的在底层）
+    ways_data.sort_by_key(|w| w.z_order);
+
+    // 第三步：序列化
+    let mut buffer = Vec::with_capacity(4 + ways_data.len() * 64);
+
+    // 写入 way_count
+    buffer.extend_from_slice(&(ways_data.len() as u32).to_le_bytes());
+
+    for way_data in ways_data {
+        // 写入 RenderFeature (2 字节)
+        buffer.extend_from_slice(&way_data.render_feature.to_le_bytes());
+
+        // 写入点数量 (4 字节)
+        buffer.extend_from_slice(&(way_data.coords.len() as u32).to_le_bytes());
+
+        // 写入投影后的坐标（每点 16 字节：x f64 + y f64）
+        for (x, y) in way_data.coords {
             buffer.extend_from_slice(&x.to_le_bytes());
             buffer.extend_from_slice(&y.to_le_bytes());
         }
-
-        valid_way_count += 1;
     }
-
-    // 回填实际的 way_count
-    buffer[way_count_pos..way_count_pos + 4]
-        .copy_from_slice(&valid_way_count.to_le_bytes());
 
     buffer
 }
