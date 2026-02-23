@@ -49,6 +49,7 @@ export interface ParseProgress {
 export interface ResponseHeader {
   nodeCount: number
   wayCount: number
+  polygonCount: number
   truncated: boolean
 }
 
@@ -116,7 +117,8 @@ export function decodeHeader(buffer: ArrayBuffer): ResponseHeader {
   return {
     nodeCount: view.getUint32(0, true),
     wayCount: view.getUint32(4, true),
-    truncated: view.getUint32(8, true) === 1,
+    polygonCount: view.getUint32(8, true),
+    truncated: view.getUint32(12, true) === 1,
   }
 }
 
@@ -127,20 +129,22 @@ export interface NodeData {
   refCount: number
 }
 
-/** V3 视口响应解码结果 */
+/** V4 视口响应解码结果 */
 export interface ViewportData {
   header: ResponseHeader
   nodes: NodeData[]
   wayGeometry: ArrayBuffer
+  polygonGeometry: ArrayBuffer
 }
 
 /**
- * 解码完整视口响应 (V3: 带节点优先级)
+ * 解码完整视口响应 (V4: 带节点优先级 + Polygon)
  *
  * 返回:
  * - header: 元数据
  * - nodes: 节点数组 (已按 ref_count 降序排列)
  * - wayGeometry: 紧凑型 Way 几何数据
+ * - polygonGeometry: Polygon 几何数据
  */
 export function decodeViewportResponseV2(buffer: ArrayBuffer): ViewportData {
   const header = decodeHeader(buffer)
@@ -151,17 +155,35 @@ export function decodeViewportResponseV2(buffer: ArrayBuffer): ViewportData {
 
   for (let i = 0; i < header.nodeCount; i++) {
     nodes.push({
-      x: view.getFloat64(offset, true),      // 墨卡托 X
-      y: view.getFloat64(offset + 8, true),  // 墨卡托 Y
+      x: view.getFloat64(offset, true), // 墨卡托 X
+      y: view.getFloat64(offset + 8, true), // 墨卡托 Y
       refCount: view.getUint16(offset + 16, true),
     })
     offset += NODE_SIZE
   }
 
+  // 解析 wayGeometry 长度
+  const wayDataStart = offset
+  const wayCount = view.getUint32(offset, true)
+  offset += 4
+
+  // 跳过所有 Way 数据找到 Polygon 数据起始位置
+  for (let w = 0; w < wayCount; w++) {
+    offset += 2 // render_feature (u16)
+    const pointCount = view.getUint32(offset, true)
+    offset += 4
+    offset += pointCount * 16 // 每点 16 字节 (x: f64 + y: f64)
+  }
+
+  const wayDataEnd = offset
+  const wayGeometry = buffer.slice(wayDataStart, wayDataEnd)
+  const polygonGeometry = buffer.slice(wayDataEnd)
+
   return {
     header,
     nodes,
-    wayGeometry: buffer.slice(offset),
+    wayGeometry,
+    polygonGeometry,
   }
 }
 

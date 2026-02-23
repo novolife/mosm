@@ -4,6 +4,7 @@
 //! 支持多线程并行解析。
 
 use crate::osm_store::{MemberType, OsmNode, OsmRelation, OsmStore, OsmWay, RelationMember};
+use crate::polygon_assembler::is_area_way;
 use crate::render_feature::parse_tags;
 use anyhow::{Context, Result};
 use osmpbf::{Element, ElementReader, RelMemberType};
@@ -65,13 +66,16 @@ pub fn parse_pbf_file(path: &Path, store: Arc<OsmStore>) -> Result<ParseProgress
                     .tags()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect();
+                let node_refs: Vec<i64> = way.refs().collect();
                 let parsed = parse_tags(&tags);
+                let is_area = is_area_way(&tags, &node_refs);
                 let osm_way = OsmWay {
                     id: way.id(),
-                    node_refs: way.refs().collect(),
+                    node_refs,
                     tags,
                     render_feature: parsed.feature,
                     layer: parsed.layer,
+                    is_area,
                 };
                 store.insert_way(osm_way);
                 ways_parsed += 1;
@@ -146,13 +150,16 @@ pub fn parse_pbf_parallel(path: &Path, store: Arc<OsmStore>) -> Result<ParseProg
                             .tags()
                             .map(|(k, v)| (k.to_string(), v.to_string()))
                             .collect();
+                        let node_refs: Vec<i64> = way.refs().collect();
                         let parsed = parse_tags(&tags);
+                        let is_area = is_area_way(&tags, &node_refs);
                         let osm_way = OsmWay {
                             id: way.id(),
-                            node_refs: way.refs().collect(),
+                            node_refs,
                             tags,
                             render_feature: parsed.feature,
                             layer: parsed.layer,
+                            is_area,
                         };
                         store_ref.insert_way(osm_way);
                         (0, 1, 0)

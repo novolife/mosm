@@ -21,8 +21,23 @@
 //!
 //! - `render_feature`: 低 8 位 = BaseType, 高 8 位 = Flags
 //! - Ways 按 z_order 升序排列，确保正确的图层遮挡
+//!
+//! ## Polygon 几何序列化格式 (V1: 多环面)
+//!
+//! 用于 Area 和 Multipolygon，支持 clip + 双倍线宽内描边效果。
+//!
+//! ```text
+//! [total_polygons: u32]
+//! [render_feature: u16][ring_count: u16][point_count_ring1: u32][x,y...]
+//!   [point_count_ring2: u32][x,y...]...
+//! ...
+//! ```
+//!
+//! - 第一个 Ring 是 outer（外环），后续是 inner（洞）
+//! - 所有环必须闭合（首尾点相同）
 
 use crate::osm_store::{OsmNode, OsmStore};
+use crate::polygon_assembler::AssembledPolygon;
 use crate::projection::lonlat_to_mercator;
 use crate::render_feature::calculate_z_order;
 use crate::spatial_query::NodeWithPriority;
@@ -170,32 +185,85 @@ pub fn encode_ways_geometry(store: &OsmStore, way_ids: &[i64]) -> Vec<u8> {
     buffer
 }
 
+/// Polygon 几何序列化（用于 Area 和 Multipolygon）
+///
+/// 格式: [polygon_count: u32]
+///       [render_feature: u16][ring_count: u16]
+///       [point_count_ring1: u32][x,y coords...]
+///       [point_count_ring2: u32][x,y coords...]...
+///
+/// 支持 clip + 双倍线宽的内向描边效果
+pub fn encode_polygons_geometry(polygons: &[AssembledPolygon]) -> Vec<u8> {
+    // 按 z_order 排序
+    let mut sorted: Vec<&AssembledPolygon> = polygons.iter().collect();
+    sorted.sort_by_key(|p| calculate_z_order(p.render_feature, p.layer));
+
+    // 预估容量
+    let estimated_size: usize = 4
+        + sorted
+            .iter()
+            .map(|p| {
+                4 + p.rings.iter().map(|r| 4 + r.len() * 16).sum::<usize>()
+            })
+            .sum::<usize>();
+
+    let mut buffer = Vec::with_capacity(estimated_size);
+
+    // 写入 polygon_count
+    buffer.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
+
+    for polygon in sorted {
+        // 写入 RenderFeature (2 字节)
+        buffer.extend_from_slice(&polygon.render_feature.to_le_bytes());
+
+        // 写入 ring_count (2 字节)
+        buffer.extend_from_slice(&(polygon.rings.len() as u16).to_le_bytes());
+
+        // 写入每个环
+        for ring in &polygon.rings {
+            // 写入点数量 (4 字节)
+            buffer.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+
+            // 写入坐标
+            for &(x, y) in ring {
+                buffer.extend_from_slice(&x.to_le_bytes());
+                buffer.extend_from_slice(&y.to_le_bytes());
+            }
+        }
+    }
+
+    buffer
+}
+
 /// 响应头 (元数据) - 16 字节
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct ViewportResponseHeader {
     pub node_count: u32,
     pub way_count: u32,
+    pub polygon_count: u32,
     pub truncated: u32,
-    pub _reserved: u32,
 }
 
-/// 构建完整的视口查询响应 (V3: 带节点优先级)
+/// 构建完整的视口查询响应 (V4: 带节点优先级 + Polygon)
 ///
 /// 格式:
 /// ```text
 /// [Header: 16 bytes]
-/// [Nodes: node_count * 24 bytes (lon, lat, ref_count, padding)]
-/// [Way geometry: variable length, see encode_ways_geometry]
+/// [Nodes: node_count * 24 bytes]
+/// [Way geometry: variable length]
+/// [Polygon geometry: variable length]
 /// ```
-pub fn build_viewport_response_v3(
+pub fn build_viewport_response_v4(
     store: &OsmStore,
     nodes: &[NodeWithPriority],
     way_ids: &[i64],
+    polygons: &[AssembledPolygon],
     truncated: bool,
 ) -> Vec<u8> {
     let way_data = encode_ways_geometry(store, way_ids);
     let node_data = encode_priority_nodes(nodes);
+    let polygon_data = encode_polygons_geometry(polygons);
 
     // 解析 way_data 获取实际的 way_count
     let actual_way_count = if way_data.len() >= 4 {
@@ -204,27 +272,42 @@ pub fn build_viewport_response_v3(
         0
     };
 
+    // 解析 polygon_data 获取实际的 polygon_count
+    let actual_polygon_count = if polygon_data.len() >= 4 {
+        u32::from_le_bytes([
+            polygon_data[0],
+            polygon_data[1],
+            polygon_data[2],
+            polygon_data[3],
+        ])
+    } else {
+        0
+    };
+
     let header = ViewportResponseHeader {
         node_count: nodes.len() as u32,
         way_count: actual_way_count,
+        polygon_count: actual_polygon_count,
         truncated: if truncated { 1 } else { 0 },
-        _reserved: 0,
     };
 
     let header_bytes = bytemuck::bytes_of(&header);
 
     let mut response = Vec::with_capacity(
-        header_bytes.len() + node_data.len() + way_data.len()
+        header_bytes.len() + node_data.len() + way_data.len() + polygon_data.len(),
     );
 
     // 1. Header
     response.extend_from_slice(header_bytes);
 
-    // 2. Node data (lon, lat, ref_count, padding) - 24 bytes each
+    // 2. Node data
     response.extend_from_slice(&node_data);
 
     // 3. Way geometry data
     response.extend_from_slice(&way_data);
+
+    // 4. Polygon geometry data
+    response.extend_from_slice(&polygon_data);
 
     response
 }

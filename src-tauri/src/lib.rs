@@ -5,6 +5,7 @@
 mod binary_protocol;
 mod osm_store;
 mod pbf_parser;
+mod polygon_assembler;
 mod projection;
 mod render_feature;
 mod spatial_query;
@@ -74,20 +75,22 @@ fn query_viewport_coords(viewport: Viewport, state: State<AppState>) -> Vec<u8> 
     buffer
 }
 
-/// 查询视口内的完整数据 (V3: 带节点优先级)
+/// 查询视口内的完整数据 (V4: 带节点优先级 + Polygon)
 ///
 /// 返回格式:
-/// - Header (16 bytes): node_count, way_count, truncated, reserved
-/// - Nodes: node_count * 24 bytes (lon, lat, ref_count, padding)
-/// - Way geometry: [total_ways][point_count][coords...]...
+/// - Header (16 bytes): node_count, way_count, polygon_count, truncated
+/// - Nodes: node_count * 24 bytes (x, y, ref_count, padding)
+/// - Way geometry: [total_ways][render_feature][point_count][coords...]...
+/// - Polygon geometry: [total_polygons][render_feature][ring_count][point_count][coords...]...
 #[tauri::command]
 fn query_viewport_full(viewport: Viewport, state: State<AppState>) -> Vec<u8> {
     let result = spatial_query::query_viewport(&state.store, &viewport);
 
-    binary_protocol::build_viewport_response_v3(
+    binary_protocol::build_viewport_response_v4(
         &state.store,
         &result.nodes,
         &result.way_ids,
+        &result.polygons,
         result.truncated,
     )
 }

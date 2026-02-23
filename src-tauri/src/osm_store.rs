@@ -29,6 +29,8 @@ pub struct OsmWay {
     pub render_feature: u16,
     /// OSM layer 值 (-5 到 +5)，用于 Z-order 排序
     pub layer: i8,
+    /// 是否是闭合面 (Area)
+    pub is_area: bool,
 }
 
 /// OSM 关系 (Relation) - 复杂的逻辑组合

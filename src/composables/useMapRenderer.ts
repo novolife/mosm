@@ -68,9 +68,10 @@ export function useMapRenderer(canvasRef: () => HTMLCanvasElement | null) {
       const rawData = await queryViewportFull(vp)
 
       if (rawData.byteLength > 16 && renderer.value) {
-        const { nodes, wayGeometry } = decodeViewportResponseV2(rawData.buffer)
+        const { nodes, wayGeometry, polygonGeometry } = decodeViewportResponseV2(rawData.buffer)
         renderer.value.setNodeData(nodes)
         renderer.value.setWayData(wayGeometry)
+        renderer.value.setPolygonData(polygonGeometry)
       }
     } catch (error) {
       console.error('获取视口数据失败:', error)

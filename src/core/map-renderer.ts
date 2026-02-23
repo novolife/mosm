@@ -100,6 +100,7 @@ export class MapRenderer {
 
   private nodes: NodeData[] = []
   private wayBuffer: ArrayBuffer | null = null
+  private polygonBuffer: ArrayBuffer | null = null
 
   private style: RenderStyle = { ...DEFAULT_STYLE }
   private animationId: number | null = null
@@ -213,10 +214,17 @@ export class MapRenderer {
     this.requestRender()
   }
 
+  /** 设置多边形数据 */
+  setPolygonData(data: ArrayBuffer): void {
+    this.polygonBuffer = data
+    this.requestRender()
+  }
+
   /** 清除所有数据 */
   clearData(): void {
     this.nodes = []
     this.wayBuffer = null
+    this.polygonBuffer = null
     this.stats.nodeCount = 0
     this.stats.wayCount = 0
     this.requestRender()
@@ -354,6 +362,8 @@ export class MapRenderer {
     ctx.save()
     ctx.translate(width / 2, height / 2)
 
+    // 渲染顺序：先底层（多边形），再线条，最后节点
+    this.renderPolygons()
     this.renderWays()
     this.renderNodes()
 
@@ -367,6 +377,134 @@ export class MapRenderer {
       x: (mercX - this.centerMercatorX) / metersPerPixel,
       y: (this.centerMercatorY - mercY) / metersPerPixel, // Y 轴翻转
     }
+  }
+
+  /**
+   * 渲染多边形 (Area + Multipolygon)
+   *
+   * 使用 clip + 双倍线宽魔法实现完美的内向描边效果：
+   * - 外环向内描边
+   * - 内环（洞）向外描边
+   *
+   * 二进制格式:
+   * [polygon_count: u32]
+   * [render_feature: u16][ring_count: u16]
+   * [point_count_ring1: u32][x,y coords...]
+   * [point_count_ring2: u32][x,y coords...]...
+   */
+  private renderPolygons(): void {
+    if (!this.polygonBuffer || this.polygonBuffer.byteLength < 4) return
+
+    const { ctx } = this
+    const view = new DataView(this.polygonBuffer)
+    const zoomFactor = Math.min(1, this.camera.zoom / 14)
+
+    let offset = 0
+    const polygonCount = view.getUint32(offset, true)
+    offset += 4
+
+    for (let p = 0; p < polygonCount; p++) {
+      // 读取 RenderFeature (2 字节)
+      const renderFeature = view.getUint16(offset, true)
+      offset += 2
+
+      // 读取 ring_count (2 字节)
+      const ringCount = view.getUint16(offset, true)
+      offset += 2
+
+      if (ringCount === 0) continue
+
+      // 获取样式
+      const style = resolveStyle(renderFeature)
+
+      // 收集所有环的屏幕坐标
+      const rings: Array<Array<{ x: number; y: number }>> = []
+
+      for (let r = 0; r < ringCount; r++) {
+        const pointCount = view.getUint32(offset, true)
+        offset += 4
+
+        const ring: Array<{ x: number; y: number }> = []
+        for (let i = 0; i < pointCount; i++) {
+          const mercX = view.getFloat64(offset, true)
+          offset += 8
+          const mercY = view.getFloat64(offset, true)
+          offset += 8
+          ring.push(this.mercatorToScreen(mercX, mercY))
+        }
+        rings.push(ring)
+      }
+
+      // === Clip 魔法渲染 ===
+      ctx.save()
+      ctx.beginPath()
+
+      // 1. 将所有环加入同一个 Path
+      for (const ring of rings) {
+        for (let i = 0; i < ring.length; i++) {
+          if (i === 0) {
+            ctx.moveTo(ring[i].x, ring[i].y)
+          } else {
+            ctx.lineTo(ring[i].x, ring[i].y)
+          }
+        }
+        ctx.closePath()
+      }
+
+      // 2. 使用 evenodd 规则裁剪
+      ctx.clip('evenodd')
+
+      // 3. 先填充一层极淡的底色
+      ctx.fillStyle = this.getPolygonFillColor(renderFeature)
+      ctx.fill('evenodd')
+
+      // 4. 双倍线宽描边（一半会被裁掉）
+      const strokeWidth = Math.max(1, style.width * zoomFactor)
+      ctx.lineWidth = strokeWidth * 2
+      ctx.strokeStyle = style.color
+      ctx.lineCap = 'round'
+      ctx.lineJoin = 'round'
+
+      // 重新绘制路径用于描边
+      ctx.beginPath()
+      for (const ring of rings) {
+        for (let i = 0; i < ring.length; i++) {
+          if (i === 0) {
+            ctx.moveTo(ring[i].x, ring[i].y)
+          } else {
+            ctx.lineTo(ring[i].x, ring[i].y)
+          }
+        }
+        ctx.closePath()
+      }
+      ctx.stroke()
+
+      ctx.restore() // 清除裁剪区域
+    }
+  }
+
+  /** 根据 RenderFeature 获取多边形填充颜色 */
+  private getPolygonFillColor(renderFeature: number): string {
+    const baseType = renderFeature & 0xff
+
+    // 建筑
+    if (baseType === 40) {
+      return 'rgba(212, 163, 115, 0.15)'
+    }
+    // 水域
+    if (baseType >= 30 && baseType < 40) {
+      return 'rgba(66, 165, 245, 0.2)'
+    }
+    // 森林/自然
+    if (baseType >= 50 && baseType < 60) {
+      return 'rgba(102, 187, 106, 0.15)'
+    }
+    // 土地利用
+    if (baseType >= 60 && baseType < 70) {
+      return 'rgba(197, 225, 165, 0.1)'
+    }
+    // 默认
+    return 'rgba(128, 128, 128, 0.1)'
   }
 
   /**

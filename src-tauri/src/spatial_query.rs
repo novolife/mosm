@@ -4,8 +4,13 @@
 //! - 视口坐标裁剪
 //! - LOD (Level of Detail) 降级策略
 //! - 瓦片分块计算
+//! - Polygon 组装 (Area + Multipolygon)
 
 use crate::osm_store::OsmStore;
+use crate::polygon_assembler::{assemble_from_closed_way, AssembledPolygon};
+// TODO: 后续添加 Relation 空间索引后启用
+#[allow(unused_imports)]
+use crate::polygon_assembler::assemble_from_relation;
 
 /// 带有引用计数的节点数据 (用于渲染优先级)
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +58,7 @@ impl Viewport {
 pub struct ViewportQueryResult {
     pub nodes: Vec<NodeWithPriority>,
     pub way_ids: Vec<i64>,
+    pub polygons: Vec<AssembledPolygon>,
     pub truncated: bool,
 }
 
@@ -173,9 +179,37 @@ pub fn query_viewport(store: &OsmStore, viewport: &Viewport) -> ViewportQueryRes
         truncated = true;
     }
 
+    // 分离 Area Way 和普通 Way
+    let mut line_way_ids: Vec<i64> = Vec::with_capacity(way_ids.len());
+    let mut area_way_ids: Vec<i64> = Vec::new();
+
+    for &way_id in &way_ids {
+        if let Some(way) = store.ways.get(&way_id) {
+            if way.is_area {
+                area_way_ids.push(way_id);
+            } else {
+                line_way_ids.push(way_id);
+            }
+        }
+    }
+
+    // 组装 Polygon
+    let mut polygons: Vec<AssembledPolygon> = Vec::with_capacity(area_way_ids.len());
+
+    // 1. 从闭合 Area Way 组装
+    for way_id in area_way_ids {
+        if let Some(polygon) = assemble_from_closed_way(store, way_id) {
+            polygons.push(polygon);
+        }
+    }
+
+    // 2. 从 Multipolygon Relation 组装 (TODO: 需要空间索引 Relation)
+    // 目前暂时跳过 Relation，后续可以添加
+
     ViewportQueryResult {
         nodes,
-        way_ids,
+        way_ids: line_way_ids,
+        polygons,
         truncated,
     }
 }
